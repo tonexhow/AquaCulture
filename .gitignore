@@ -29,11 +29,9 @@ network/.qa/
 *.pth
 *.onnx
 *.tflite
-*.ncnn.bin
 models/**/*.bin
 .DS_Store
 Thumbs.db
-models/**/*.ncnn.bin
 *.db-shm
 *.db-wal
 *.sqlite
