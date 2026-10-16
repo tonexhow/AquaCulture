@@ -1,294 +1,285 @@
-
-cd ~/AquaCulture
+cd ~/AquaCulture || exit 1
 
 bash <<'AQUACULTURE_SETUP'
 set -Eeuo pipefail
+
+export SYSTEMD_PAGER=cat
+export PAGER=cat
 
 PROJECT_DIR="$HOME/AquaCulture"
 APP_USER="$(id -un)"
 VENV_DIR="$PROJECT_DIR/.venv"
 PYTHON="$VENV_DIR/bin/python"
-
 WEB_SERVICE="aquaculture-web.service"
 BLE_SERVICE="aquaculture-ble.service"
 
-echo "=========================================="
-echo " AQUACULTURE AUTOMATIC STARTUP SETUP"
-echo "=========================================="
+failure() {
+    code=$?
+    echo
+    echo "[ERROR] Setup stopped at line $1 (exit code $code)."
+    echo "Do not reboot yet. Copy the terminal error for troubleshooting."
+    exit "$code"
+}
+trap 'failure "$LINENO"' ERR
+
+section() {
+    echo
+    echo "=================================================="
+    echo " $1"
+    echo "=================================================="
+}
+
+section "AQUACULTURE - FIRST-TIME RASPBERRY PI SETUP"
 echo "Project: $PROJECT_DIR"
 echo "User: $APP_USER"
-echo
+echo "Python: $PYTHON"
 
-# ------------------------------------------
-# 1. Validate project files
-# ------------------------------------------
-
+# 1. Validate project. Never silently create an empty project.
 cd "$PROJECT_DIR"
-
 for file in \
-    "server/app.py" \
-    "server/requirements.txt" \
-    "network/rpi/main.py" \
-    "network/rpi/requirements.txt" \
-    "startup/install.sh"; do
-
+    server/app.py \
+    server/requirements.txt \
+    network/rpi/main.py \
+    network/rpi/requirements.txt \
+    startup/install.sh; do
     if [ ! -f "$file" ]; then
-        echo "ERROR: Missing $file"
+        echo "[ERROR] Project file missing: $file"
         exit 1
     fi
 done
-
-echo "[OK] Project structure verified."
-
-# ------------------------------------------
-# 2. Stop existing services
-# ------------------------------------------
-
-echo "[INFO] Stopping existing services..."
-
-sudo systemctl stop \
-    "$WEB_SERVICE" \
-    "$BLE_SERVICE" 2>/dev/null || true
-
-# ------------------------------------------
-# 3. Install operating system packages
-# ------------------------------------------
-
-echo "[INFO] Installing system dependencies..."
-
-sudo apt-get update
-
-sudo apt-get install -y \
-    python3 \
-    python3-pip \
-    python3-venv \
-    python3-dev \
-    python3-dbus \
-    python3-gi \
-    python3-gi-cairo \
-    gir1.2-glib-2.0 \
-    build-essential \
-    pkg-config \
-    libglib2.0-dev \
-    libdbus-1-dev \
-    libbluetooth-dev \
-    bluetooth \
-    bluez \
-    network-manager
-
-echo "[OK] System dependencies installed."
-
-# ------------------------------------------
-# 4. Create Python virtual environment
-# ------------------------------------------
-
-echo "[INFO] Configuring Python environment..."
-
-if [ ! -f "$PYTHON" ]; then
-    python3 -m venv \
-        --system-site-packages \
-        "$VENV_DIR"
+if [ "$APP_USER" = root ]; then
+    echo "[ERROR] Run this setup as the normal Pi account, not in a root shell."
+    exit 1
 fi
+if [ ! -f .env ]; then
+    echo "[WARNING] .env is missing. Check application configuration before deployment."
+fi
+echo "[OK] Project structure found."
 
-# Allow access to OS-provided D-Bus/PyGObject
-# without attempting to reinstall them via pip.
+# 2. Authenticate sudo now, before performing changes.
+sudo -v
+
+# 3. Stop existing AquaCulture units so files are not in use.
+section "STOPPING EXISTING APPLICATION SERVICES"
+sudo systemctl stop "$WEB_SERVICE" "$BLE_SERVICE" 2>/dev/null || true
+sudo systemctl reset-failed "$WEB_SERVICE" "$BLE_SERVICE" 2>/dev/null || true
+
+# 4. Install OS dependencies on Raspberry Pi OS / Debian Trixie.
+section "INSTALLING SYSTEM DEPENDENCIES"
+sudo apt-get update
+sudo apt-get install -y \
+    python3 python3-pip python3-venv python3-dev \
+    python3-dbus python3-gi python3-gi-cairo gir1.2-glib-2.0 \
+    build-essential pkg-config \
+    libglib2.0-dev libdbus-1-dev libbluetooth-dev \
+    bluetooth bluez rfkill network-manager
+
+# 5. Create a venv. Debian's dbus / gi packages are installed through apt.
+section "CREATING PYTHON ENVIRONMENT"
+if [ ! -x "$PYTHON" ]; then
+    python3 -m venv --system-site-packages "$VENV_DIR"
+fi
 if [ -f "$VENV_DIR/pyvenv.cfg" ]; then
-    sed -i \
-        's/^include-system-site-packages = false/include-system-site-packages = true/' \
+    sed -i 's/^include-system-site-packages = false/include-system-site-packages = true/' \
         "$VENV_DIR/pyvenv.cfg"
 fi
-
 "$PYTHON" -m pip --version
 
-echo "[OK] Python environment ready."
+section "INSTALLING AQUACULTURE REQUIREMENTS"
+"$PYTHON" -m pip install -r "$PROJECT_DIR/server/requirements.txt"
+"$PYTHON" -m pip install -r "$PROJECT_DIR/network/rpi/requirements.txt"
 
-# ------------------------------------------
-# 5. Install Python dependencies
-# ------------------------------------------
-
-echo "[INFO] Installing Flask backend packages..."
-
-"$PYTHON" -m pip install \
-    -r "$PROJECT_DIR/server/requirements.txt"
-
-echo "[INFO] Installing Bluetooth packages..."
-
-"$PYTHON" -m pip install \
-    -r "$PROJECT_DIR/network/rpi/requirements.txt"
-
-# ------------------------------------------
-# 6. Verify essential Python modules
-# ------------------------------------------
-
-echo "[INFO] Checking Python modules..."
-
-"$PYTHON" - <<'PYTHON_CHECK'
+section "VERIFYING PYTHON IMPORTS"
+"$PYTHON" - <<'PY_CHECK'
 import importlib
+for module in ("flask", "flask_socketio", "dbus", "dbus_next", "gi", "werkzeug"):
+    importlib.import_module(module)
+    print("[OK]", module)
+PY_CHECK
 
-modules = [
-    "flask",
-    "dbus",
-    "gi",
-]
+# 6. Restrict access to private application data without touching contents.
+# Do not change ownership of the project or run either Python service as root.
+section "SECURING CONFIGURATION AND DATABASE FILE MODES"
+if [ -f "$PROJECT_DIR/.env" ] && [ ! -L "$PROJECT_DIR/.env" ]; then
+    chmod 600 "$PROJECT_DIR/.env"
+    echo "[OK] .env restricted to its owner."
+fi
+if [ -d "$PROJECT_DIR/database" ]; then
+    find "$PROJECT_DIR/database" -maxdepth 1 -type f \
+        \( -name '*.sqlite3' -o -name '*.sqlite' -o -name '*.db' \) \
+        -exec chmod 600 {} +
+    echo "[OK] Top-level SQLite database file modes restricted to their owner."
+fi
+# Existing directories, database rows, users, and passwords are not modified.
 
-for name in modules:
-    importlib.import_module(name)
-    print(f"[OK] {name}")
-
-print("[OK] Essential Python imports succeeded.")
-PYTHON_CHECK
-
-# ------------------------------------------
-# 7. Enable operating system services
-# ------------------------------------------
-
-echo "[INFO] Enabling Bluetooth service..."
-
-sudo systemctl enable bluetooth.service
-sudo systemctl start bluetooth.service
-
-# NetworkManager is required by AquaCulture
-# Bluetooth Wi-Fi provisioning.
-# Do not automatically replace an existing
-# network configuration manager.
-if systemctl is-active --quiet NetworkManager.service; then
-    echo "[OK] NetworkManager is running."
-else
+# 7. Bluetooth and NetworkManager.
+section "ENABLING BLUETOOTH"
+sudo systemctl enable --now bluetooth.service
+if ! systemctl is-active --quiet NetworkManager.service; then
     echo "[WARNING] NetworkManager is not running."
-    echo "[WARNING] Bluetooth Wi-Fi provisioning may need"
-    echo "          separate network configuration."
+    echo "[WARNING] Do not switch network managers remotely without reviewing the Pi network setup."
+else
+    echo "[OK] NetworkManager is active."
 fi
 
-# ------------------------------------------
-# 8. Install AquaCulture startup services
-# ------------------------------------------
+# Last diagnosis showed Powered: no even while bluetooth.service was active.
+# These commands only unblock/power Bluetooth; they do not reset pairing data.
+sudo rfkill unblock bluetooth
+if ! sudo timeout 12 bluetoothctl power on; then
+    echo "[WARNING] Bluetooth power-on command failed."
+fi
+if sudo timeout 8 bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then
+    echo "[OK] Bluetooth controller powered on."
+else
+    echo "[WARNING] Bluetooth controller still not powered on."
+    sudo timeout 8 bluetoothctl show 2>/dev/null || true
+fi
 
-echo "[INFO] Installing AquaCulture services..."
+# 8. Install the supplied, managed AquaCulture systemd services.
+section "INSTALLING AQUACULTURE SYSTEMD SERVICES"
+sudo bash "$PROJECT_DIR/startup/install.sh" \
+    --python "$PYTHON" \
+    --user "$APP_USER"
 
-sudo bash "$PROJECT_DIR/startup/install.sh"
-
-# ------------------------------------------
-# 9. Configure Python executable via
-#    persistent systemd overrides
-# ------------------------------------------
-
-echo "[INFO] Configuring Python service paths..."
-
+# 9. Persistent ExecStart paths, including compatibility with earlier setup.
+# The installer owns the service units. The drop-ins set the exact venv paths.
+section "CONFIGURING PERSISTENT SERVICE OVERRIDES"
 sudo mkdir -p \
     "/etc/systemd/system/$WEB_SERVICE.d" \
     "/etc/systemd/system/$BLE_SERVICE.d"
 
 printf '[Service]\nExecStart=\nExecStart=%s -u %s/server/app.py\n' \
-    "$PYTHON" "$PROJECT_DIR" |
-    sudo tee \
-        "/etc/systemd/system/$WEB_SERVICE.d/override.conf" \
-        >/dev/null
+    "$PYTHON" "$PROJECT_DIR" | \
+    sudo tee "/etc/systemd/system/$WEB_SERVICE.d/override.conf" >/dev/null
 
 printf '[Service]\nExecStart=\nExecStart=%s -u %s/network/rpi/main.py\n' \
-    "$PYTHON" "$PROJECT_DIR" |
-    sudo tee \
-        "/etc/systemd/system/$BLE_SERVICE.d/override.conf" \
-        >/dev/null
+    "$PYTHON" "$PROJECT_DIR" | \
+    sudo tee "/etc/systemd/system/$BLE_SERVICE.d/override.conf" >/dev/null
+
+# Root is used ONLY for the narrow Bluetooth power-on prerequisites,
+# while the BLE application itself still runs under the regular Pi user.
+RFKILL_BIN="$(sudo sh -c 'command -v rfkill')"
+BTCTL_BIN="$(sudo sh -c 'command -v bluetoothctl')"
+{
+    printf '[Unit]\nAfter=bluetooth.service NetworkManager.service\n'
+    printf 'Wants=bluetooth.service NetworkManager.service\n'
+    printf '[Service]\n'
+    printf 'ExecStartPre=+%s unblock bluetooth\n' "$RFKILL_BIN"
+    printf 'ExecStartPre=+%s power on\n' "$BTCTL_BIN"
+} | sudo tee "/etc/systemd/system/$BLE_SERVICE.d/40-bluetooth-power.conf" >/dev/null
 
 sudo systemctl daemon-reload
+sudo systemctl enable "$WEB_SERVICE" "$BLE_SERVICE"
+sudo systemctl reset-failed "$WEB_SERVICE" "$BLE_SERVICE" 2>/dev/null || true
 
-# ------------------------------------------
-# 10. Enable automatic startup
-# ------------------------------------------
+# 10. Start services and allow time for startup / restart failures.
+section "STARTING AQUACULTURE"
+sudo systemctl restart "$WEB_SERVICE" || true
+sudo systemctl restart "$BLE_SERVICE" || true
+sleep 18
 
-echo "[INFO] Enabling AquaCulture on boot..."
-
-sudo systemctl enable \
-    "$WEB_SERVICE" \
-    "$BLE_SERVICE"
-
-# ------------------------------------------
-# 11. Restart AquaCulture services
-# ------------------------------------------
-
-echo "[INFO] Starting AquaCulture..."
-
-sudo systemctl restart "$WEB_SERVICE"
-sudo systemctl restart "$BLE_SERVICE"
-
-echo "[INFO] Waiting for startup..."
-sleep 15
-
-# ------------------------------------------
-# 12. Verify service status
-# ------------------------------------------
-
-echo
-echo "=========================================="
-echo " SERVICE STATUS"
-echo "=========================================="
-
-systemctl --no-pager --full status \
-    "$WEB_SERVICE" || true
-
-systemctl --no-pager --full status \
-    "$BLE_SERVICE" || true
-
-echo
-echo "=========================================="
-echo " AUTOMATIC STARTUP"
-echo "=========================================="
-
-systemctl is-enabled \
-    "$WEB_SERVICE" \
-    "$BLE_SERVICE" || true
-
-echo
-echo "=========================================="
-echo " SERVICE LOGS"
-echo "=========================================="
-
-sudo journalctl \
-    -u "$WEB_SERVICE" \
-    -n 25 \
-    --no-pager
-
-sudo journalctl \
-    -u "$BLE_SERVICE" \
-    -n 25 \
-    --no-pager
-
-echo
-echo "=========================================="
-echo " FINAL VERIFICATION"
-echo "=========================================="
-
-FAILED=0
-
-for SERVICE in "$WEB_SERVICE" "$BLE_SERVICE"; do
-
-    if systemctl is-active --quiet "$SERVICE"; then
-        echo "[OK] $SERVICE is running."
-    else
-        echo "[FAILED] $SERVICE is not running."
-        FAILED=1
-    fi
-
-    if systemctl is-enabled --quiet "$SERVICE"; then
-        echo "[OK] $SERVICE is enabled on boot."
-    else
-        echo "[FAILED] $SERVICE is not enabled."
-        FAILED=1
-    fi
-
+section "SERVICE STATE"
+for unit in "$WEB_SERVICE" "$BLE_SERVICE"; do
+    echo "---- $unit ----"
+    systemctl is-enabled "$unit" || true
+    systemctl is-active "$unit" || true
+    systemctl show "$unit" -p User -p Group -p ExecMainStatus -p NRestarts --no-pager || true
 done
 
-echo
-echo "Project: $PROJECT_DIR"
-echo "Python: $PYTHON"
-echo
+section "RECENT WEB LOGS"
+sudo journalctl -u "$WEB_SERVICE" -n 20 --no-pager || true
+section "RECENT BLUETOOTH LOGS"
+sudo journalctl -u "$BLE_SERVICE" -n 30 --no-pager || true
 
+# 11. Fail honestly if either service still crashes.
+section "FINAL VERIFICATION"
+FAILED=0
+for unit in "$WEB_SERVICE" "$BLE_SERVICE"; do
+    if systemctl is-enabled --quiet "$unit"; then
+        echo "[OK] $unit enabled at boot."
+    else
+        echo "[FAILED] $unit not enabled at boot."
+        FAILED=1
+    fi
+    if systemctl is-active --quiet "$unit"; then
+        echo "[OK] $unit currently running."
+    else
+        echo "[FAILED] $unit not running."
+        FAILED=1
+    fi
+    restarts="$(systemctl show "$unit" -p NRestarts --value 2>/dev/null || echo 0)"
+    if [[ "$restarts" =~ ^[0-9]+$ ]] && [ "$restarts" -gt 0 ]; then
+        echo "[FAILED] $unit restarted $restarts time(s) during this check."
+        FAILED=1
+    fi
+done
+
+# If Bluetooth fails, show stack FRAME LOCATIONS without printing error
+# messages that might contain Wi-Fi details or other secrets.
+if ! systemctl is-active --quiet "$BLE_SERVICE"; then
+    section "BLE FAILURE LOCATION (SAFE TRACEBACK)"
+    echo "[INFO] Stopping BLE restart loop and running a brief diagnostic."
+    sudo systemctl stop "$BLE_SERVICE" || true
+    set +e
+    timeout 12 "$PYTHON" -u - "$PROJECT_DIR" <<'PY_BLE_TRACE'
+import logging
+import runpy
+import sys
+import traceback
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+entry = root / "network" / "rpi" / "main.py"
+sys.path[:0] = [str(entry.parent), str(root / "network"), str(root)]
+sys.argv = [str(entry)]
+original_error = logging.error
+
+def show_failure_location(message, *args, **kwargs):
+    exception_type, value, tb = sys.exc_info()
+    if exception_type is not None and tb is not None:
+        print("[BLE EXCEPTION TYPE]", exception_type.__name__, flush=True)
+        for frame in traceback.extract_tb(tb):
+            path = Path(frame.filename)
+            try:
+                short_path = path.relative_to(root)
+            except ValueError:
+                short_path = path.name
+            print(f"[BLE FRAME] {short_path}:{frame.lineno} ({frame.name})", flush=True)
+    return original_error(message, *args, **kwargs)
+
+logging.error = show_failure_location
+try:
+    runpy.run_path(str(entry), run_name="__main__")
+except SystemExit:
+    pass
+except Exception as error:
+    print("[BLE UNHANDLED EXCEPTION TYPE]", type(error).__name__, flush=True)
+    for frame in traceback.extract_tb(error.__traceback__):
+        path = Path(frame.filename)
+        try:
+            short_path = path.relative_to(root)
+        except ValueError:
+            short_path = path.name
+        print(f"[BLE FRAME] {short_path}:{frame.lineno} ({frame.name})", flush=True)
+PY_BLE_TRACE
+    trace_status=$?
+    set -e
+    if [ "$trace_status" -eq 124 ]; then
+        echo "[INFO] Diagnostic timed out after 12 seconds; check live BLE behavior."
+    fi
+    echo "[WARNING] Bluetooth remains stopped until its failure is resolved."
+    echo "[WARNING] Review the BLE FRAME lines above; do not grant blanket root privileges."
+    FAILED=1
+fi
+
+echo
 if [ "$FAILED" -eq 0 ]; then
-    echo "[OK] Both services are active and enabled."
-    echo "Check logs and functionality before reboot testing."
+    echo "[OK] Both AquaCulture services are enabled and currently active."
+    echo "[NEXT] Test web UI, BLE advertising, Admin verification, and Wi-Fi provisioning."
+    echo "[NEXT] Only after those tests, reboot and repeat service checks."
 else
-    echo "[WARNING] One or more service checks failed."
-    echo "Review the logs above before rebooting."
+    echo "[INCOMPLETE] Installation performed, but at least one check failed."
+    echo "[NEXT] Share the failure lines and BLE FRAME lines before calling setup finished."
     exit 1
 fi
 
