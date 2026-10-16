@@ -1,0 +1,33 @@
+description: Ultralytics FishInv model trained on /workspaces/dev/notebooks/datasets/MixedFishInvSplit/data.yaml
+author: Ultralytics
+date: '2026-06-28T16:31:33.366858'
+version: 8.4.80
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: bolbometopon_muricatum
+  1: chaetodontidae
+  2: cheilinus_undulatus
+  3: cromileptes_altivelis
+  4: fish
+  5: haemulidae
+  6: lutjanidae
+  7: muraenidae
+  8: scaridae
+  9: serranidae
+  10: urchin
+  11: giant_clam
+  12: sea_cucumber
+  13: crown_of_thorns
+  14: lobster
+args:
+  batch: 1
+  quantize: null
+channels: 3
+end2end: false

@@ -1,0 +1,21 @@
+description: Ultralytics MegaFauna model trained on /workspaces/dev/notebooks/datasets/MixedMegaFaunaSplit/data.yaml
+author: Ultralytics
+date: '2026-06-28T16:38:24.553872'
+version: 8.4.80
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: ray
+  1: shark
+  2: turtle
+args:
+  batch: 1
+  quantize: null
+channels: 3
+end2end: false

@@ -1,0 +1,32 @@
+[
+  {
+    "img": "/static/images/developers/1.png",
+    "name": "Mike Suarez",
+    "birthyear": "",
+    "role": "Team Leader"
+  },
+  {
+    "img": "/static/images/developers/2.png",
+    "name": "Donna Mae Pacaldo",
+    "birthyear": "",
+    "role": "Project Member"
+  },
+  {
+    "img": "/static/images/developers/3.png",
+    "name": "Member 3",
+    "birthyear": "",
+    "role": "Project Member"
+  },
+  {
+    "img": "/static/images/developers/4.png",
+    "name": "Member 4",
+    "birthyear": "",
+    "role": "Project Member"
+  },
+  {
+    "img": "/static/images/developers/5.png",
+    "name": "Member 5",
+    "birthyear": "",
+    "role": "Project Member"
+  }
+]
