@@ -1,0 +1,5 @@
+cd ~/AquaCulture
+bash startup/install.sh --dry-run
+sudo bash startup/install.sh
+
+bash startup/status.sh
