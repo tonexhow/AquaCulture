@@ -81,3 +81,20 @@ NCNN model paths are `models/FishInv_ncnn_model/` and
 `driver/nano.ino` and `driver/wiring.txt` define the existing hardware interface;
 the MQ-137 gas measurement must not be interpreted as a calibrated water-ammonia
 measurement without a separate hardware/calibration review.
+
+## Visual scanning update (2026-10-17)
+
+The **Fish Weight Scanning** page uses a four-stage pipeline:
+
+1. **Record:** Capture cached camera video frames for the selected **3, 5, or 10 seconds**. The selection is a recording duration, **not** the overall AI processing deadline. The capture is sampled into memory; this update does not create a permanent MP4 file.
+2. **Select:** Evaluate readable frames for image sharpness, brightness and duplicate bytes. Shortlist up to **5 frames (default) or 10 frames**; show thumbnails and animate rejected candidates.
+3. **Predict:** Run the existing `models/FishInv_ncnn_model` and `models/MegaFauna_ncnn_model` in isolated processes on the shortlisted frames. Display frame-by-frame progress, annotations, confidence and errors. An AI error is **not** treated as an empty scene. This can take several minutes on Raspberry Pi 4B.
+4. **Results:** Prefer the frame with model-confirmed aquatic detections and confidence (quality breaks ties). Highlight the best frame green; show boxes, counts and size estimates if available. A successfully processed empty scene produces **No aquatic object detected**.
+
+Visual jobs start via `POST /api/prediction/start` (`202 Accepted`) and are tracked via authenticated `GET /api/prediction/status`. `POST /api/prediction/cancel` stops recording or terminates an in-flight isolated worker. Do not configure the reverse proxy or frontend to require an HTTP request to stay open for the entire prediction. Only one visual job can run per backend process.
+
+The recording duration and NCNN processing limit are independent. The processing limit defaults to `max(120, 60 × selected_frame_count)` seconds, bounded to 900 seconds. Set `AQUACULTURE_VISUAL_PROCESS_TIMEOUT=600` in your existing `.env` if needed. Each child also respects `AQUACULTURE_ML_TIMEOUT` (default 300 seconds).
+
+**Deployment:** Merge these source files into your *existing* Pi install. Preserve your `.env`, `database/` records, `models/` binaries, `driver/` configuration and connected camera hardware. This upload is intentionally a source-only update, not a full Raspberry Pi installation. After restarting the Flask service, hard-refresh the browser and test both an empty camera scene and a fish-containing scene. Cancel during inference once to verify responsiveness. Real fish length and weight require proper camera geometry and scale calibration; no generic bounding box provides accurate centimeters by itself.
+
+For implementation details and regression checks, see [`SCAN_PIPELINE_UPDATE.md`](SCAN_PIPELINE_UPDATE.md).

@@ -29,6 +29,11 @@
     loggingOut: false,
     lastSensorAt: 0,
     modelsReady: false,
+    visualJobId: null,
+    visualJobRunning: false,
+    visualPollTimer: null,
+    visualLastFrameKey: "",
+    visualLastResultJobId: null,
   };
 
   document.addEventListener("DOMContentLoaded", init);
@@ -171,6 +176,7 @@
     $("#refreshLiveButton")?.addEventListener("click", loadInitialBackendState);
 
     $("#visualScanButton")?.addEventListener("click", startVisualScan);
+    $("#visualCancelButton")?.addEventListener("click", cancelVisualScan);
     $("#recommendationScanButton")?.addEventListener("click", startRecommendationScan);
 
     const cameraFeed = $("#cameraFeed");
@@ -346,7 +352,7 @@
     loginButton?.classList.toggle("is-authenticated", state.loggedIn);
     $$('[data-requires-admin="1"]').forEach((button) => {
       const missingModel = button.id === "visualScanButton" && !state.modelsReady;
-      button.disabled = missingModel;
+      button.disabled = missingModel || (button.id === "visualScanButton" && state.visualJobRunning);
       button.classList.toggle("is-locked", !state.loggedIn);
       button.title = missingModel ? "Trained model files are not installed yet."
         : state.loggedIn ? "" : "Click to sign in before scanning.";
@@ -398,6 +404,7 @@
       state.loggedIn = false;
     }
     syncAuthUi();
+    if (state.loggedIn && !state.visualPollTimer) void refreshVisualStatus();
   }
 
   function scheduleSessionExpiry() {
@@ -771,32 +778,139 @@
     }
   }
 
+  // The HTTP request only starts a background job. Poll the job status while
+  // Pi NCNN inference runs: do not abort after the 3/5/10-second capture time.
   async function startVisualScan() {
     if (!state.modelsReady) { showToast("Fish model weights have not been installed.", "warning"); return; }
-    if (!requireAdminForScan()) return;
+    if (!requireAdminForScan() || state.visualJobRunning) return;
+    const duration = numberInput("#visualDuration", 3, 1, 10);
+    const images = numberInput("#visualImages", 5, 1, 10);
     const button = $("#visualScanButton");
-    const duration = numberInput("#visualDuration", 5, 1, 60);
-    const images = numberInput("#visualImages", 5, 1, 30);
-
-    setBusy(button, true, "SCANNING");
-    setText("#visualStatusChip", "Scanning");
-    setHtml("#visualResult", `<div class="empty-state">Capturing ${images} image target(s) for about ${duration} second(s)…</div>`);
+    setBusy(button, true, "Starting...");
+    state.visualLastFrameKey = "";
+    state.visualLastResultJobId = null;
+    $("#visualScanProgress").hidden = false;
+    setHtml("#visualResult", `<div class="empty-state">Recording ${duration} seconds of camera video. AI predictions will follow.</div>`);
 
     const response = await postJson("/api/prediction/start", {
       session_id: state.sessionId,
-      admin_token: state.adminToken,
       duration_seconds: duration,
       top: images,
-      target_fps: Math.max(1, images / Math.max(1, duration)),
-    }, { timeoutMs: duration * 1000 + 1500 });
+      target_fps: Math.min(10, Math.max(4, Math.ceil((images * 2) / duration))),
+    }, { timeoutMs: 15000 });
 
     setBusy(button, false, "Start fish scan ↗");
-    if (response.ok) {
-      renderPredictionResult(response.result || response);
-      setText("#visualStatusChip", "Completed");
-    } else {
-      setText("#visualStatusChip", "Failed");
-      setHtml("#visualResult", errorBlock(response.message || response.error || "Visual scan failed safely."));
+    if (!response.ok || !response.accepted) {
+      setText("#visualStatusChip", "Unavailable");
+      setHtml("#visualResult", errorBlock(response.message || "Scan could not start."));
+      // An HTTP timeout can occur after the backend has accepted the job.
+      // Check status before treating it as a lost scan.
+      void refreshVisualStatus();
+      return;
+    }
+    state.visualJobId = response.job_id;
+    state.visualJobRunning = true;
+    syncAuthUi();
+    $("#visualCancelButton").hidden = false;
+    renderVisualStatus(response.status || { running: true, stage: "recording", progress: 0 });
+    scheduleVisualPoll(0);
+  }
+
+  async function cancelVisualScan() {
+    if (!requireAdminForScan() || !state.visualJobRunning) return;
+    const cancel = $("#visualCancelButton");
+    if (cancel) { cancel.disabled = true; cancel.textContent = "Cancelling..."; }
+    const response = await postJson("/api/prediction/cancel", {}, { timeoutMs: 10000 });
+    if (!response.ok) showToast(response.message || "Could not cancel scan.", "warning");
+    scheduleVisualPoll(0);
+  }
+
+  function scheduleVisualPoll(delayMs = 850) {
+    window.clearTimeout(state.visualPollTimer);
+    state.visualPollTimer = window.setTimeout(() => {
+      state.visualPollTimer = null;
+      void refreshVisualStatus();
+    }, delayMs);
+  }
+
+  async function refreshVisualStatus() {
+    if (!state.loggedIn) return;
+    const response = await getJson("/api/prediction/status");
+    if (!response.ok) {
+      if (state.visualJobRunning) {
+        setText("#visualStageMessage", "Connection interrupted; waiting to resume updates...");
+        scheduleVisualPoll(2000);
+      }
+      return;
+    }
+    renderVisualStatus(response);
+    if (response.running) scheduleVisualPoll(850);
+  }
+
+  function renderVisualStatus(status) {
+    if (!status || typeof status !== "object") return;
+    if (status.job_id && state.visualJobId !== status.job_id) {
+      state.visualJobId = status.job_id;
+      state.visualLastFrameKey = "";
+      state.visualLastResultJobId = null;
+    }
+    const progressPanel = $("#visualScanProgress");
+    if (progressPanel && (status.running || (status.stage && status.stage !== "idle"))) progressPanel.hidden = false;
+    const stage = status.stage || "idle";
+    const percentage = Math.max(0, Math.min(100, Number(status.progress) || 0));
+    const stages = ["recording", "selecting", "predicting", "complete"];
+    const activeIndex = stage === "failed" || stage === "cancelled" ? 3 : stages.indexOf(stage);
+    $$('[data-scan-stage]').forEach((item, index) => {
+      item.classList.toggle("is-active", index === activeIndex);
+      item.classList.toggle("is-complete", index < activeIndex || (stage === "complete" && index <= activeIndex));
+    });
+    setText("#visualStageMessage", status.message || "Working...");
+    setText("#visualProgressText", `${percentage}%`);
+    const bar = $("#visualProgressBar");
+    if (bar) bar.setAttribute("aria-valuenow", String(percentage));
+    const fill = $("#visualProgressFill");
+    if (fill) fill.style.width = `${percentage}%`;
+    const total = Number(status.frames_total) || 0;
+    const done = Number(status.frames_done) || 0;
+    const detail = stage === "recording"
+      ? `Recorded ${Number(status.recorded_seconds || 0).toFixed(1)} / ${status.duration_seconds || "?"} seconds · ${status.snapshots_captured || 0} frames captured`
+      : stage === "selecting" ? "Ranking frames by sharpness and exposure. Rejected candidates fade away."
+      : stage === "predicting" ? `AI analyzed ${done} / ${total} selected frames. Pi 4B models may take 20–30+ seconds per frame.`
+      : stage === "complete" ? "Results ready. The winning frame is highlighted in green."
+      : stage === "cancelled" ? "The scan has been cancelled."
+      : stage === "failed" ? "Analysis failed. Please review the error below."
+      : "Select a capture duration to begin.";
+    setText("#visualProgressDetail", detail);
+    const frames = Array.isArray(status.frames) ? status.frames : [];
+    const frameKey = JSON.stringify(frames.map(f => [f.image_id, f.status, f.object_count, f.confidence, Boolean(f.preview)]));
+    if (frameKey !== state.visualLastFrameKey) {
+      state.visualLastFrameKey = frameKey;
+      setHtml("#visualFrameGrid", frames.map((frame, index) => {
+        const discarded = frame.status === "discarded";
+        const best = frame.status === "best";
+        const label = discarded ? "Discarded" : best ? "Best frame" : frame.status === "done" ? `${Number(frame.object_count) || 0} objects` : frame.status === "failed" ? "Failed" : "Queued";
+        return `<div class="ac-scan-frame${frame.selected ? " is-shortlisted" : ""}${discarded ? " is-discarded" : ""}${best ? " is-best" : ""}${frame.status === "failed" ? " is-failed" : ""}">
+          ${frame.preview ? `<img alt="Recorded frame ${index + 1}" src="${escapeAttr(frame.preview)}">` : `<div class="ac-scan-frame-empty">Frame ${index + 1}</div>`}
+          <span class="ac-scan-frame-label">${discarded ? "⌫" : best ? "✓" : "◦"} ${escapeHtml(label)}</span>
+          ${frame.confidence !== null && frame.confidence !== undefined ? `<small>${Math.round(Number(frame.confidence) * 100)}% confidence</small>` : ""}
+        </div>`;
+      }).join(""));
+    }
+    state.visualJobRunning = Boolean(status.running);
+    syncAuthUi();
+    const cancel = $("#visualCancelButton");
+    if (cancel) {
+      cancel.hidden = !state.visualJobRunning;
+      if (!status.cancel_requested) { cancel.disabled = false; cancel.textContent = "Cancel scan"; }
+    }
+    setText("#visualStatusChip", status.running ? `${percentage}%` : stage === "complete" ? "Completed" : stage === "failed" ? "Failed" : stage === "cancelled" ? "Cancelled" : "Idle");
+    if (!status.running && status.last_result && state.visualLastResultJobId !== status.job_id) {
+      state.visualLastResultJobId = status.job_id;
+      if (status.last_result.ok === false) {
+        setHtml("#visualResult", errorBlock(status.last_result.message || status.last_result.error || "Visual scan failed."));
+      } else {
+        renderPredictionResult(status.last_result);
+      }
     }
   }
 
@@ -849,9 +963,11 @@
   }
 
   function renderPredictionEvent(event) {
-    if (!event) return;
-    if (event.message) setText("#visualStatusChip", `${event.progress || 0}%`);
-    if (event.result) renderPredictionResult(event.result);
+    if (!event || (state.visualJobId && event.job_id && event.job_id !== state.visualJobId)) return;
+    // Keep fast socket hints, but use the authenticated status endpoint as the
+    // source of truth for thumbnails and per-frame progress.
+    if (event.message && state.visualJobRunning) setText("#visualStageMessage", event.message);
+    if (state.visualJobRunning) scheduleVisualPoll(100);
   }
 
   function renderRecommendationEvent(event) {
@@ -870,12 +986,18 @@
     const objects = Array.isArray(result.objects) ? result.objects : [];
     const images = Array.isArray(result.images) ? result.images : [];
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
-
-    if (!objects.length && !images.length) {
-      setHtml("#visualResult", `<div class="empty-state">${escapeHtml(result.message || result.note || "No aquatic object was detected.")}</div>`);
-      return;
-    }
-
+    const bestId = result.best_frame_id;
+    const bestImage = images.find(image => image.image_id === bestId) || images[0];
+    const chosenImage = bestImage?.boxed_image_data_url || bestImage?.raw_image_data_url || "";
+    const imageHtml = chosenImage ? `<img class="result-image previewable-image" data-image-preview="1" alt="Best frame prediction result" src="${escapeAttr(chosenImage)}">` : "";
+    const frameTiles = images.length ? `<div class="ac-result-frames">${images.map(image => {
+      const src = image.boxed_image_data_url || image.raw_image_data_url;
+      const best = image.image_id === bestId;
+      return `<div class="ac-result-frame${best ? " is-best" : ""}">
+        ${src ? `<img src="${escapeAttr(src)}" alt="Analyzed frame ${escapeAttr(image.image_id || "")}">` : ""}
+        <span>${best ? "✓ Best frame" : escapeHtml(image.image_id || "Frame")} · ${Number(image.object_count) || 0} detected</span>
+      </div>`;
+    }).join("")}</div>` : "";
     const objectCards = objects.slice(0, 8).map((object, index) => `
       <article class="result-card">
         <h3>${escapeHtml(object.class || object.class_name || `Object ${index + 1}`)}</h3>
@@ -888,16 +1010,16 @@
         </div>
       </article>
     `).join("");
-
-    const firstImage = images.find((image) => image.boxed_image_data_url) || images.find((image) => image.raw_image_data_url);
-    const imageHtml = firstImage ? `<img class="result-image previewable-image" data-image-preview="1" alt="Prediction result" src="${escapeAttr(firstImage.boxed_image_data_url || firstImage.raw_image_data_url)}">` : "";
     const warningHtml = warnings.length ? `<p class="is-warn">${escapeHtml(warnings[0])}</p>` : "";
     const emptyMessage = result.message || "No aquatic target was detected in the analyzed frames.";
-
+    const downloadHtml = result.download_available && result.prediction_id
+      ? `<a class="ac2-button ac2-button-outline" href="/api/prediction/${encodeURIComponent(result.prediction_id)}/download">Download scan archive</a>` : "";
     setHtml("#visualResult", `
       ${imageHtml}
       ${warningHtml}
+      ${frameTiles}
       ${objectCards || `<div class="empty-state">${escapeHtml(emptyMessage)}</div>`}
+      ${downloadHtml}
     `);
   }
 

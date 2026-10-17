@@ -10,13 +10,15 @@ Purpose:
 - Saves prediction ZIP files to database/media/predictions; SQLite stores relative paths.
 
 Architecture:
-PHASE 1: DATA GATHERING
-- Capture snapshots first.
-- Store image bytes + timestamp + frame number + optional distance_cm.
+PHASE 1: RECORD VIDEO FRAMES
+- Sample the existing camera feed for the user-selected recording duration.
+- Store temporary JPEG bytes + timestamp + frame number + optional distance_cm.
 
-PHASE 2: ANALYTICS
-- Select usable frames.
-- Detect aquatic targets.
+PHASE 2: SELECT FRAMES
+- Shortlist the best 5 or 10 readable frames using quality/exposure/duplicates.
+
+PHASE 3: ANALYTICS (separately timed, background HTTP job)
+- Detect aquatic targets using the isolated NCNN subprocess.
 - Draw boxes/crops.
 - Estimate size approximately.
 - Package prediction_info.txt, result.txt, result.json, images, and crops into a ZIP.
@@ -31,6 +33,8 @@ Important:
 from __future__ import annotations
 
 import base64
+import hashlib
+import uuid
 import io
 import json
 import math
@@ -344,20 +348,36 @@ class PredictionState:
     running: bool = False
     cancel_requested: bool = False
     current_prediction_id: Optional[int] = None
+    job_id: Optional[str] = None
+    stage: str = "idle"
+    stage_progress: int = 0
     message: str = "Prediction is idle."
     started_at: Optional[str] = None
     progress: int = 0
+    duration_seconds: float = 0.0
+    recorded_seconds: float = 0.0
+    snapshots_captured: int = 0
+    frames_total: int = 0
+    frames_done: int = 0
+    frames: List[Dict[str, Any]] = field(default_factory=list)
+    best_frame_id: Optional[str] = None
     last_result: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "ok": True,
-            "running": self.running,
+            "ok": True, "running": self.running,
             "cancel_requested": self.cancel_requested,
             "current_prediction_id": self.current_prediction_id,
-            "message": self.message,
-            "started_at": self.started_at,
+            "job_id": self.job_id, "stage": self.stage,
+            "stage_progress": self.stage_progress,
+            "message": self.message, "started_at": self.started_at,
             "progress": self.progress,
+            "duration_seconds": self.duration_seconds,
+            "recorded_seconds": self.recorded_seconds,
+            "snapshots_captured": self.snapshots_captured,
+            "frames_total": self.frames_total, "frames_done": self.frames_done,
+            "frames": [dict(frame) for frame in self.frames],
+            "best_frame_id": self.best_frame_id,
             "last_result": self.last_result,
         }
 
@@ -408,7 +428,7 @@ def cancel_prediction() -> Dict[str, Any]:
         if not _state.running:
             return {"ok": True, "message": "No prediction is currently running.", "running": False}
         _state.cancel_requested = True
-        _state.message = "Cancel requested. The system will analyze already gathered snapshots."
+        _state.message = "Cancel requested. Stopping recording or current model inference."
         return _state.to_dict()
 
 
@@ -432,196 +452,336 @@ def _set_state(**kwargs: Any) -> None:
                 setattr(_state, key, value)
 
 
+def _begin_prediction(duration_seconds: float) -> Optional[str]:
+    """Reserve the only scanner slot before starting a background thread."""
+    with _state_lock:
+        if _state.running:
+            return None
+        job_id = uuid.uuid4().hex
+        _state.running = True
+        _state.cancel_requested = False
+        _state.current_prediction_id = None
+        _state.job_id = job_id
+        _state.stage = "recording"
+        _state.stage_progress = 0
+        _state.started_at = _now_iso()
+        _state.message = "Recording camera frames."
+        _state.progress = 0
+        _state.duration_seconds = duration_seconds
+        _state.recorded_seconds = 0.0
+        _state.snapshots_captured = 0
+        _state.frames_total = 0
+        _state.frames_done = 0
+        _state.frames = []
+        _state.best_frame_id = None
+        _state.last_result = None
+        return job_id
+
+
+def _stage_update(
+    callback: Optional[Callable[[Dict[str, Any]], None]],
+    stage: str, message: str, progress: int, stage_progress: int = 0, **values: Any,
+) -> None:
+    progress = max(0, min(100, int(progress)))
+    stage_progress = max(0, min(100, int(stage_progress)))
+    _set_state(stage=stage, message=message, progress=progress,
+               stage_progress=stage_progress, **values)
+    # Socket events are small and never contain frame images. Authenticated
+    # clients retrieve previews/results from the prediction/status endpoint.
+    _push_event(callback, {"type": "prediction", "job_id": _state.job_id,
+                           "stage": stage, "message": message,
+                           "progress": progress, "stage_progress": stage_progress})
+
+
+def start_prediction_background(
+    session_id: Optional[int] = None,
+    duration_seconds: float = 5.0,
+    top: int = 5,
+    target_fps: float = 4.0,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    """Return immediately; status polling survives reverse-proxy request timeouts."""
+    duration_seconds = max(1.0, min(10.0, float(duration_seconds or 5.0)))
+    job_id = _begin_prediction(duration_seconds)
+    if job_id is None:
+        return {"ok": False, "message": "A visual scan is already running.",
+                "status": get_prediction_status()}
+
+    def run_background() -> None:
+        _execute_prediction(job_id, session_id, duration_seconds, top,
+                            target_fps, event_callback)
+
+    try:
+        threading.Thread(target=run_background, daemon=True,
+                         name=f"aquaculture-visual-{job_id[:8]}").start()
+    except Exception as error:
+        return _finish_with_error("Could not launch visual scan.",
+                                  _safe_error(error), event_callback=event_callback)
+    return {"ok": True, "accepted": True, "job_id": job_id,
+            "message": "Recording started. AI processing will continue after the recording.",
+            "status": get_prediction_status()}
+
+
 def start_prediction(
     session_id: Optional[int] = None,
     duration_seconds: float = 5.0,
     top: int = 5,
-    target_fps: float = 2.0,
+    target_fps: float = 4.0,
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
-    """
-    Main route-ready entry point for POST /api/prediction/start.
-
-    routing.py should already check that the session is registered before calling this.
-    """
-    with _state_lock:
-        if _state.running:
-            return {
-                "ok": False,
-                "message": "A prediction is already running.",
-                "status": _state.to_dict(),
-            }
-        _state.running = True
-        _state.cancel_requested = False
-        _state.current_prediction_id = None
-        _state.message = "Prediction started. Capturing snapshots."
-        _state.started_at = _now_iso()
-        _state.progress = 5
-        _state.last_result = None
-
-    started_time = time.monotonic()
-    # The selected time limits the ENTIRE scan, not just the camera burst.
-    # Inference is isolated in a killable subprocess with the remaining budget.
+    """Synchronous compatibility entry point for offline tests and tools."""
     duration_seconds = max(1.0, min(10.0, float(duration_seconds or 5.0)))
-    deadline = started_time + duration_seconds
-    top = max(1, min(30, _safe_int(top, 5)))
-    target_fps = max(0.5, min(10.0, float(target_fps or 2.0)))
+    job_id = _begin_prediction(duration_seconds)
+    if job_id is None:
+        return {"ok": False, "message": "A visual scan is already running.",
+                "status": get_prediction_status()}
+    return _execute_prediction(job_id, session_id, duration_seconds,
+                               top, target_fps, event_callback)
+
+
+def _frame_preview(image_bytes: bytes, size: int = 220) -> str:
+    """Bounded thumbnail for status polling, not an archive of raw video."""
+    if not image_bytes or cv2 is None or np is None:
+        return ""
+    try:
+        image = _decode_image(image_bytes)
+        if image is None:
+            return ""
+        height, width = image.shape[:2]
+        scale = min(1.0, size / max(1.0, float(max(width, height))))
+        if scale < 1:
+            image = cv2.resize(image, (max(1, int(width * scale)),
+                                       max(1, int(height * scale))),
+                               interpolation=cv2.INTER_AREA)
+        ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 62])
+        return "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii") if ok else ""
+    except Exception:
+        return ""
+
+
+def _summarize_frame(record: Dict[str, Any], *, selected: bool = False) -> Dict[str, Any]:
+    return {
+        "image_id": _safe_image_id(str(record.get("selected_id") or f"frame-{record.get('frame_number') or 0}"), 0),
+        "frame_number": record.get("frame_number"),
+        "quality_score": round(float(record.get("quality_score") or 0), 1),
+        "selected": selected,
+        "status": "queued" if selected else "discarded",
+        "object_count": 0,
+        "confidence": None,
+        "preview": _frame_preview(record.get("image_bytes") or b""),
+    }
+
+
+def _best_frame_id(images: List[Dict[str, Any]], selected: List[Dict[str, Any]]) -> Optional[str]:
+    """Prefer confirmed aquatic detection, then confidence and image quality."""
+    if not images:
+        return None
+    qualities = {_safe_image_id(str(r.get("selected_id")), 0): float(r.get("quality_score") or 0)
+                 for r in selected}
+    best = max(images, key=lambda r: (
+        int(r.get("object_count") or 0) > 0,
+        max((float(o.get("confidence") or 0) for o in (r.get("objects") or [])), default=0),
+        int(r.get("object_count") or 0),
+        qualities.get(str(r.get("image_id")), 0),
+    ))
+    return str(best.get("image_id") or "") or None
+
+
+def _execute_prediction(
+    job_id: str, session_id: Optional[int], duration_seconds: float,
+    top: int, target_fps: float,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]],
+) -> Dict[str, Any]:
+    started_time = time.monotonic()
+    top = max(1, min(10, _safe_int(top, 5)))
+    # Sample more often than the desired short list. This is cached camera video
+    # frames, not repeated heavy image uploads or a separate camera owner.
+    target_fps = max(1.0, min(10.0, float(target_fps or 4.0)))
 
     try:
-        _push_event(event_callback, {"type": "prediction", "message": "Capturing snapshots.", "progress": 10})
-
         if camera_module is None:
-            return _finish_with_error("Camera module is unavailable.")
+            return _finish_with_error("Camera module is unavailable.", event_callback=event_callback)
 
         active_sensor_manager = getattr(sensor_module, "sensor_manager", None) if sensor_module else None
-        camera_status_before = {}
         try:
-            camera_status_before = camera_module.get_status() if hasattr(camera_module, "get_status") else {}
+            camera_before = camera_module.get_status() if hasattr(camera_module, "get_status") else {}
         except Exception:
-            camera_status_before = {}
+            camera_before = {}
 
-        # Reserve analysis time; spending the entire limit collecting snapshots
-        # made empty scenes appear to scan indefinitely during NCNN inference.
-        capture_budget = max(0.6, min(duration_seconds * 0.40, duration_seconds - 0.4))
+        # The chosen 3/5/10 seconds apply ONLY to this camera recording stage.
+        # Inference can take minutes on Pi 4B and must use its own deadline.
+        def recording_progress(elapsed: float, count: int) -> None:
+            pct = min(100, int(100 * elapsed / duration_seconds))
+            _stage_update(event_callback, "recording",
+                          f"Recording {min(elapsed, duration_seconds):.1f}s / {duration_seconds:g}s",
+                          min(30, round(30 * pct / 100)), pct,
+                          recorded_seconds=round(min(elapsed, duration_seconds), 2),
+                          snapshots_captured=count)
+
         snapshots = camera_module.capture_burst(
-            duration_seconds=capture_budget,
-            target_fps=target_fps,
+            duration_seconds=duration_seconds,
+            target_fps=max(target_fps, (top * 2) / duration_seconds),
             sensor_manager=active_sensor_manager,
             cancel_checker=_is_cancel_requested,
+            progress_callback=recording_progress,
         )
         capture_elapsed = time.monotonic() - started_time
-
-        _set_state(message="Analyzing snapshots.", progress=35)
-        _push_event(event_callback, {
-            "type": "prediction",
-            "message": f"Captured {len(snapshots)} snapshot records. Analyzing now.",
-            "progress": 35,
-        })
-
+        if _is_cancel_requested():
+            return _finish_with_error("Fish scan cancelled.", cancelled=True,
+                                      event_callback=event_callback)
         if not snapshots:
-            return _finish_with_error("No snapshots were captured within the selected time. Check the camera connection.")
+            return _finish_with_error("Camera recorded no usable frames. Check camera connection.",
+                                      event_callback=event_callback)
 
-        selected = select_best_snapshots(snapshots, minimum=1, maximum=top, deadline=deadline)
+        _stage_update(event_callback, "selecting", "Assessing sharpness and lighting.",
+                      32, 15, recorded_seconds=round(capture_elapsed, 2),
+                      snapshots_captured=len(snapshots))
+        selected = select_best_snapshots(snapshots, minimum=1, maximum=top)
         if not selected:
-            return _finish_with_error("No usable snapshots were available for analysis.")
+            return _finish_with_error("No readable frames were recorded.",
+                                      event_callback=event_callback)
+        selected_ids = {id(record) for record in selected}
+        frames = [_summarize_frame(record, selected=id(record) in selected_ids)
+                  for record in snapshots]
+        # Frames dropped before inference are not deleted from a user's saved
+        # recordings: only these temporary in-memory previews are discarded.
+        _stage_update(event_callback, "selecting",
+                      f"Selected {len(selected)} of {len(snapshots)} candidate frames.",
+                      42, 100, frames=frames, frames_total=len(selected), frames_done=0)
+        if _is_cancel_requested():
+            return _finish_with_error("Fish scan cancelled.", cancelled=True,
+                                      event_callback=event_callback)
 
-        _set_state(message="Detecting aquatic objects.", progress=55)
-        detection_result = analyze_selected_snapshots(
-            selected, top=top, deadline=deadline, cancel_checker=_is_cancel_requested
+        processing_timeout = max(120.0, min(900.0, float(_safe_int(
+            os.environ.get("AQUACULTURE_VISUAL_PROCESS_TIMEOUT"), top * 60))))
+        processing_deadline = time.monotonic() + processing_timeout
+        _stage_update(event_callback, "predicting", "Analyzing frame 1 of " + str(len(selected)),
+                      43, 0)
+
+        def on_frame_processed(record: Dict[str, Any], processed: int, total: int,
+                               boxed_bytes: Optional[bytes]) -> None:
+            with _state_lock:
+                for frame in _state.frames:
+                    if frame.get("image_id") == str(record.get("image_id")):
+                        frame["status"] = "done" if not record.get("worker_error") else "failed"
+                        frame["object_count"] = int(record.get("object_count") or 0)
+                        frame["confidence"] = max((float(obj.get("confidence") or 0)
+                                                   for obj in record.get("objects") or []), default=None)
+                        if boxed_bytes:
+                            frame["preview"] = _frame_preview(boxed_bytes)
+                        if record.get("warning"):
+                            frame["warning"] = record["warning"]
+                        break
+            pct = min(100, int(100 * processed / max(1, total)))
+            _stage_update(event_callback, "predicting",
+                          f"Analyzed {processed} / {total} frames.",
+                          43 + round(49 * pct / 100), pct, frames_done=processed)
+
+        detection = analyze_selected_snapshots(
+            selected, top=top, deadline=processing_deadline,
+            cancel_checker=_is_cancel_requested, progress_callback=on_frame_processed,
         )
         if _is_cancel_requested():
-            return _finish_with_error("Fish scan cancelled by the user.")
-        if detection_result.get("timed_out") or time.monotonic() >= deadline - 0.10:
-            message = (
-                f"The {duration_seconds:g}-second fish scan limit was reached, "
-                "or the model failed before all selected frames were analyzed. "
-                "No reliable fish detection can be reported. Try a longer scan "
-                "or check the model setup."
-            )
-            return _finish_with_error(message, timed_out=True)
+            return _finish_with_error("Fish scan cancelled.", cancelled=True,
+                                      event_callback=event_callback)
+        if detection.get("timed_out"):
+            return _finish_with_error(
+                f"AI analysis timed out after up to {processing_timeout:g}s. "
+                "Recording completed; try fewer frames or one model.",
+                timed_out=True, event_callback=event_callback)
+        if detection.get("model_failed"):
+            return _finish_with_error("No AI model completed inference. Check NCNN runtime/errors.",
+                                      error="; ".join(detection.get("model_errors") or [])[:700],
+                                      event_callback=event_callback)
+        if not detection.get("images"):
+            return _finish_with_error("No frames completed image analysis.",
+                                      event_callback=event_callback)
 
-        # An empty scene is a completed NO-DETECTION result, not a reason to
-        # compress dozens of photos or leave a spinner active for minutes.
-        if not detection_result.get("objects"):
-            result_summary = {
-                "ok": True, "objects": [], "images": [],
+        image_records = detection.get("images") or []
+        best_id = _best_frame_id(image_records, selected)
+        with _state_lock:
+            _state.best_frame_id = best_id
+            for frame in _state.frames:
+                if frame.get("selected") and frame.get("image_id") == best_id:
+                    frame["status"] = "best"
+                elif frame.get("selected"):
+                    frame["status"] = "discarded"
+        _stage_update(event_callback, "packaging", "Preparing final result and archive.",
+                      94, 10, best_frame_id=best_id)
+
+        try:
+            camera_after = camera_module.get_status() if hasattr(camera_module, "get_status") else camera_before
+        except Exception:
+            camera_after = camera_before
+        if not detection.get("objects"):
+            # Even a legitimate empty-scene scan retains thumbnails and per-frame
+            # counts. This is not a timeout or a bogus model success.
+            result = {
+                "ok": True, "objects": [], "images": [
+                    {"image_id": r.get("image_id"), "frame_number": r.get("frame_number"),
+                     "object_count": 0, "model_attempts": r.get("model_attempts") or [],
+                     "raw_image_data_url": _frame_preview(
+                         next((v.get("image_bytes") for v in selected
+                               if v.get("selected_id") == r.get("image_id")), b""))}
+                    for r in image_records],
                 "object_count": 0, "snapshot_count": len(snapshots),
-                "selected_snapshot_count": len(selected),
+                "selected_snapshot_count": len(selected), "best_frame_id": best_id,
                 "prediction_id": None, "download_available": False,
                 "scan_limit_seconds": duration_seconds,
+                "capture_duration": round(capture_elapsed, 2),
                 "elapsed_seconds": round(time.monotonic() - started_time, 3),
-                "detector_used": detection_result.get("detector_used"),
-                "warnings": ["No model-confirmed aquatic objects in the analyzed frames."],
+                "detector_used": detection.get("detector_used"),
+                "warnings": detection.get("model_errors") or [],
                 "message": "No aquatic object detected in the analyzed frames.",
             }
-            _set_state(running=False, cancel_requested=False, message=result_summary["message"],
-                       progress=100, last_result=result_summary)
-            _push_event(event_callback, {"type": "prediction", "message": result_summary["message"],
-                                         "progress": 100, "result": result_summary})
-            return {"ok": True, "message": result_summary["message"], "result": result_summary}
-
-        _set_state(message="Packaging prediction result.", progress=80)
-        camera_status_after = {}
-        try:
-            camera_status_after = camera_module.get_status() if hasattr(camera_module, "get_status") else camera_status_before
-        except Exception:
-            camera_status_after = camera_status_before
-
-        # On a short time budget, preserve confirmed detections rather than
-        # waiting for ZIP generation/disk IO beyond the selected limit.
-        if deadline - time.monotonic() < 1.0:
-            summary = {
-                "ok": True, "objects": detection_result.get("objects", []), "images": [],
-                "object_count": len(detection_result.get("objects", [])),
-                "snapshot_count": len(snapshots), "prediction_id": None,
-                "download_available": False, "scan_limit_seconds": duration_seconds,
-                "elapsed_seconds": round(time.monotonic() - started_time, 3),
-                "warnings": ["Detection completed; result ZIP was not saved within the scan limit."],
-                "message": "Aquatic objects detected. Export skipped to respect scan time limit.",
-            }
-            _set_state(running=False, cancel_requested=False, progress=100,
-                       message=summary["message"], last_result=summary)
-            _push_event(event_callback, {"type": "prediction", "message": summary["message"],
-                                         "progress": 100, "result": summary})
-            return {"ok": True, "message": summary["message"], "result": summary}
-
-        zip_bytes, result_summary = build_prediction_zip(
-            session_id=session_id,
-            started_at=_state.started_at or _now_iso(),
-            capture_duration=round(capture_elapsed, 2),
-            snapshots=snapshots,
-            selected_snapshots=selected,
-            detection_result=detection_result,
-            camera_status=camera_status_after or camera_status_before,
-        )
-
-        # Avoid extra SQLite/media writes after the selected scan deadline.
-        if time.monotonic() >= deadline:
-            return _finish_with_error(
-                f"The {duration_seconds:g}-second fish scan time limit was reached during result packaging.",
-                timed_out=True,
+        else:
+            zip_bytes, result = build_prediction_zip(
+                session_id=session_id,
+                started_at=_state.started_at or _now_iso(),
+                capture_duration=round(capture_elapsed, 2),
+                snapshots=snapshots,
+                selected_snapshots=selected,
+                detection_result=detection,
+                camera_status=camera_after or camera_before,
             )
+            prediction_id: Optional[int] = None
+            if db is not None:
+                try:
+                    prediction_id = db.insert_prediction_zip(zip_bytes, session_id=session_id)
+                except Exception as error:
+                    result["database_warning"] = (
+                        f"Prediction archive was created but not saved: {_safe_error(error)}")
+            result.update(prediction_id=prediction_id,
+                          download_available=prediction_id is not None,
+                          best_frame_id=best_id,
+                          scan_limit_seconds=duration_seconds,
+                          elapsed_seconds=round(time.monotonic() - started_time, 3),
+                          message="Aquatic objects detected. Measurements are approximate.")
 
-        prediction_id: Optional[int] = None
-        if db is not None:
-            try:
-                prediction_id = db.insert_prediction_zip(zip_bytes, session_id=session_id)
-            except Exception as error:
-                result_summary["database_warning"] = f"Prediction ZIP was created but not saved: {_safe_error(error)}"
-
-        result_summary["prediction_id"] = prediction_id
-        result_summary["download_available"] = prediction_id is not None
-        result_summary["scan_limit_seconds"] = duration_seconds
-        result_summary["elapsed_seconds"] = round(time.monotonic() - started_time, 3)
-        result_summary["message"] = (
-            "No aquatic object detected in analyzed frames."
-            if not result_summary.get("objects") else "Aquatic objects detected. Estimates are approximate."
-        )
-
-        _set_state(
-            running=False,
-            cancel_requested=False,
-            current_prediction_id=prediction_id,
-            message="Prediction completed.",
-            progress=100,
-            last_result=result_summary,
-        )
-        _push_event(event_callback, {"type": "prediction", "message": "Prediction completed.", "progress": 100, "result": result_summary})
-
-        return {
-            "ok": True,
-            "message": result_summary["message"],
-            "prediction_id": prediction_id,
-            "result": result_summary,
-        }
+        _stage_update(event_callback, "complete", result["message"], 100, 100,
+                      running=False, cancel_requested=False,
+                      current_prediction_id=result.get("prediction_id"),
+                      last_result=result, best_frame_id=best_id)
+        return {"ok": True, "message": result["message"],
+                "job_id": job_id, "prediction_id": result.get("prediction_id"),
+                "result": result}
     except Exception as error:
-        return _finish_with_error("Prediction failed safely.", error=_safe_error(error))
+        return _finish_with_error("Prediction failed safely.", error=_safe_error(error),
+                                  event_callback=event_callback)
 
 
-def _finish_with_error(message: str, error: Optional[str] = None, timed_out: bool = False) -> Dict[str, Any]:
+def _finish_with_error(
+    message: str, error: Optional[str] = None, timed_out: bool = False,
+    cancelled: bool = False,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
     payload = {"ok": False, "message": message, "error": error,
-               "timed_out": timed_out, "timestamp": _now_iso()}
-    _set_state(running=False, cancel_requested=False, message=message, progress=0, last_result=payload)
+               "timed_out": timed_out, "cancelled": cancelled,
+               "timestamp": _now_iso()}
+    stage = "cancelled" if cancelled else "failed"
+    _stage_update(event_callback, stage, message, _state.progress,
+                  _state.stage_progress, running=False,
+                  cancel_requested=False, last_result=payload)
     return payload
 
 
@@ -636,46 +796,42 @@ def select_best_snapshots(
     If OpenCV is not installed, it still returns usable JPEG records in original order.
     """
     candidates: List[Tuple[float, int, Dict[str, Any]]] = []
-    seen_sizes: set[int] = set()
+    seen_hashes: set[str] = set()
+    maximum = max(1, min(10, int(maximum)))
 
     for index, record in enumerate(snapshots):
-        if deadline is not None and time.monotonic() >= deadline - 0.25:
+        if deadline is not None and time.monotonic() >= deadline:
             break
         image_bytes = record.get("image_bytes")
         if not image_bytes:
             continue
-
-        # Simple duplicate guard for repeated fallback frames.
-        byte_size = len(image_bytes)
-        if byte_size in seen_sizes and len(snapshots) > minimum:
+        digest = hashlib.sha256(image_bytes).hexdigest()
+        if digest in seen_hashes:
             continue
-        seen_sizes.add(byte_size)
-
-        score = 1.0
+        seen_hashes.add(digest)
+        sharpness, brightness = 0.0, 128.0
         if cv2 is not None and np is not None:
             image = _decode_image(image_bytes)
-            if image is not None:
-                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-                sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-                brightness = float(gray.mean())
-                if brightness < 20 or brightness > 245:
-                    continue
-                score = sharpness + brightness
-
-        candidates.append((score, index, record))
+            if image is None:
+                continue
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            sharpness = max(0.0, float(cv2.Laplacian(gray, cv2.CV_64F).var()))
+            brightness = float(gray.mean())
+        # Rank by sharpness/exposure, but never discard a readable blank frame:
+        # white/empty scenes should finish as genuine 'no detection', not an error.
+        sharp_score = min(70.0, 17.5 * math.log1p(sharpness))
+        exposure_score = max(0.0, 30.0 - abs(brightness - 128.0) * 30.0 / 128.0)
+        quality = round(sharp_score + exposure_score, 2)
+        record["quality_score"] = quality
+        candidates.append((quality, index, record))
 
     if not candidates:
         return []
 
-    candidates.sort(key=lambda item: item[0], reverse=True)
+    # Ranked best-to-worst; retain their original chronology after selection.
+    candidates.sort(key=lambda item: (-item[0], item[1]))
     selected = [record for _, _, record in candidates[:maximum]]
     selected.sort(key=lambda row: int(row.get("frame_number") or 0))
-
-    # Minimum selected images means use up to 5 when enough frames exist, not fail when fewer exist.
-    if len(selected) < minimum and len(candidates) >= minimum:
-        selected = [record for _, _, record in candidates[:minimum]]
-        selected.sort(key=lambda row: int(row.get("frame_number") or 0))
-
     for idx, row in enumerate(selected, start=1):
         row["selected_id"] = f"selected_{idx:03d}"
     return selected
@@ -686,6 +842,7 @@ def analyze_selected_snapshots(
     selected_snapshots: List[Dict[str, Any]], top: int = 5,
     deadline: Optional[float] = None,
     cancel_checker: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any], int, int, Optional[bytes]], None]] = None,
 ) -> Dict[str, Any]:
     """
     Analyze selected images and keep the result grouped by image.
@@ -716,6 +873,8 @@ def analyze_selected_snapshots(
     selected_limit = max(1, min(30, _safe_int(top, 5)))
     selected_for_analysis = selected_snapshots[:selected_limit]
     timed_out = False
+    completed_model_frames = 0
+    model_errors: List[str] = []
 
     for index, record in enumerate(selected_for_analysis, start=1):
         if (cancel_checker and cancel_checker()) or (deadline is not None and time.monotonic() >= deadline - 0.15):
@@ -758,9 +917,17 @@ def analyze_selected_snapshots(
             detections, detector_label, yolo_meta = _detect_with_marine_ncnn_worker(
                 image, worker_model_paths, deadline=deadline, cancel_checker=cancel_checker
             )
-            if yolo_meta.get("timed_out") or yolo_meta.get("cancelled") or yolo_meta.get("worker_error"):
+            if yolo_meta.get("timed_out") or yolo_meta.get("cancelled"):
                 timed_out = True
+            if yolo_meta.get("worker_error"):
+                model_errors.append(str(yolo_meta["worker_error"]))
+                image_record["worker_error"] = str(yolo_meta["worker_error"])
+            else:
+                completed_model_frames += 1
             image_record["model_attempts"] = yolo_meta.get("attempts", [])
+            for model_attempt in image_record["model_attempts"]:
+                if model_attempt.get("error"):
+                    model_errors.append(f"{model_attempt.get('model', 'model')}: {model_attempt['error']}")
             image_record["non_aquatic_guard"] = {"blocked": False, "message": "Aquatic model worker; general detector guard skipped."}
             if detector_label:
                 image_record["detector_used"] = detector_label
@@ -867,7 +1034,14 @@ def analyze_selected_snapshots(
 
         boxed_jpeg = _encode_image(boxed)
         boxed_images[boxed_path] = boxed_jpeg or image_bytes
+        image_record["objects"] = [obj.to_dict() for obj in all_objects
+                                   if obj.image_id == selected_id]
         image_records.append(image_record)
+        if progress_callback:
+            try:
+                progress_callback(image_record, index, len(selected_for_analysis), boxed_jpeg or image_bytes)
+            except Exception:
+                pass
         if timed_out:
             break
 
@@ -888,6 +1062,9 @@ def analyze_selected_snapshots(
             "pt_yolo_subprocess" if use_pt_worker else "pt_yolo_inprocess" if models else "opencv_fallback"
         ),
         "timed_out": timed_out,
+        "model_failed": bool(worker_model_paths and completed_model_frames == 0 and not timed_out),
+        "model_errors": model_errors,
+        "completed_model_frames": completed_model_frames,
         "model_error": _model_error,
         "model_load_errors": dict(_model_load_errors),
         "models_available": all_model_names,
@@ -1057,6 +1234,12 @@ def _detect_with_marine_ncnn_worker(
             return [], "marine_ncnn_worker:failed", {
                 "attempts": attempts or [{"model": path.name, "raw_count": 0, "target_count": 0, "error": str(worker_message)} for path in model_paths],
                 "worker_error": f"exit={completed.returncode}; message={worker_message}; stderr={stderr}; stdout={stdout}",
+            }
+        if payload.get("ok") is False or not payload.get("models_used"):
+            return [], "marine_ncnn_worker:failed", {
+                "attempts": payload.get("attempts") or [],
+                "worker_error": str(payload.get("message") or payload.get("error") or
+                                    "No NCNN model successfully executed."),
             }
         detections = payload.get("detections") if isinstance(payload, dict) else []
         if not isinstance(detections, list):

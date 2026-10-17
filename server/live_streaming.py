@@ -347,6 +347,7 @@ class CameraManager:
         target_fps: float = 2.0,
         sensor_manager: Any = None,
         cancel_checker: Optional[CancelChecker] = None,
+        progress_callback: Optional[Callable[[float, int], None]] = None,
     ) -> List[Dict[str, Any]]:
         self.start()
         duration_seconds = max(1.0, float(duration_seconds or 5.0))
@@ -381,7 +382,17 @@ class CameraManager:
                     }
                 )
                 index += 1
+            if progress_callback:
+                try:
+                    progress_callback(min(duration_seconds, duration_seconds - max(0.0, deadline - time.monotonic())), len(records))
+                except Exception:
+                    pass
             self._stop_event.wait(min(gap, max(0.0, deadline - time.monotonic())))
+        if progress_callback:
+            try:
+                progress_callback(duration_seconds, len(records))
+            except Exception:
+                pass
         return records
 
     # ------------------------------------------------------------------
@@ -864,10 +875,12 @@ def capture_burst(
     target_fps: float = 2.0,
     sensor_manager: Any = None,
     cancel_checker: Optional[CancelChecker] = None,
+    progress_callback: Optional[Callable[[float, int], None]] = None,
 ) -> List[Dict[str, Any]]:
     return camera_manager.capture_burst(
         duration_seconds=duration_seconds,
         target_fps=target_fps,
         sensor_manager=sensor_manager,
         cancel_checker=cancel_checker,
+        progress_callback=progress_callback,
     )

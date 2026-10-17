@@ -93,7 +93,7 @@ def register_routes(app: Flask, socketio: Any = None) -> None:
 
     @app.after_request
     def protect_recovery_responses(response):
-        if request.path in {"/forgot-password", "/reset-password"} or request.path.startswith("/api/admin/password/") or request.path == "/api/admin/recovery-email":
+        if request.path in {"/forgot-password", "/reset-password", "/api/prediction/status", "/api/size-detection/status"} or request.path.startswith("/api/admin/password/") or request.path == "/api/admin/recovery-email":
             response.headers["Cache-Control"] = "no-store"
             response.headers["Referrer-Policy"] = "no-referrer"
             response.headers["X-Content-Type-Options"] = "nosniff"
@@ -464,17 +464,31 @@ def register_routes(app: Flask, socketio: Any = None) -> None:
 
             session = read_admin_session() or {}
             data = payload()
-            emit(socketio, "scan_status", {"kind": "visual", "running": True, "message": "Visual size scan started.", "started_by": session_public_data(session) if session else {}})
-            result = size_detection.start_prediction(
+            emit(socketio, "scan_status", {"kind": "visual", "running": True,
+                    "message": "Visual recording started.",
+                    "started_by": session_public_data(session) if session else {}})
+
+            emit_event = socket_event_callback(socketio)
+
+            def visual_progress(event: Dict[str, Any]) -> None:
+                # Background worker events must not require a Flask request context.
+                emit_event(event)
+                if event.get("stage") in {"complete", "failed", "cancelled"}:
+                    emit(socketio, "scan_status", {"kind": "visual", "running": False,
+                         "message": event.get("message") or "Visual scan finished."})
+                    emit(socketio, "prediction_status", {"stage": event.get("stage"),
+                         "running": False, "message": event.get("message") or ""})
+
+            result = size_detection.start_prediction_background(
                 session_id=safe_int_or_none(data.get("session_id")),
                 duration_seconds=safe_float(data.get("duration_seconds"), 5.0),
                 top=safe_int(data.get("top"), 5),
-                target_fps=safe_float(data.get("target_fps"), 2.0),
-                event_callback=socket_event_callback(socketio),
+                target_fps=safe_float(data.get("target_fps"), 4.0),
+                event_callback=visual_progress,
             )
-            emit(socketio, "prediction_status", size_detection.get_prediction_status())
-            emit(socketio, "scan_status", {"kind": "visual", "running": False, "message": "Visual size scan finished.", "result": result})
-            return ok(result)
+            if not result.get("ok"):
+                return ok(result, status=409)
+            return ok(result, status=202)
         except Exception as error:
             emit(socketio, "scan_status", {"kind": "visual", "running": False, "message": "Visual size scan failed."})
             return exception_response("Prediction failed safely.", error)
@@ -497,6 +511,9 @@ def register_routes(app: Flask, socketio: Any = None) -> None:
     @app.get("/api/prediction/status")
     @app.get("/api/size-detection/status")
     def api_prediction_status() -> Any:
+        auth_error = require_admin_session_response()
+        if auth_error is not None:
+            return auth_error
         try:
             from scanner import size_detection
 

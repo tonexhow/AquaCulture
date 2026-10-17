@@ -46,3 +46,53 @@
 #loginModal #adminPassword[aria-invalid="true"] { border-color:var(--status-danger); }
 #loginModal .ac2-form-actions { margin-top:1.25rem; gap:.65rem; }
 #loginModal .ac2-form-actions .ac2-button { min-height:44px; min-width:88px; }
+
+/* Four-stage visual scan: recording -> frame selection -> NCNN -> results. */
+.ac-scan-progress {
+  margin-bottom:1.35rem; padding:1.15rem; border:1px solid var(--aqua-border);
+  border-radius:.9rem; background:var(--aqua-primary-soft); color:var(--aqua-text);
+}
+.ac-scan-stages { display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
+  list-style:none; margin:0 0 1.15rem; padding:0; gap:.45rem; }
+.ac-scan-stages li { border:1px solid var(--aqua-border); border-radius:.6rem;
+  background:var(--aqua-surface); padding:.55rem .25rem; color:var(--aqua-muted);
+  display:flex; flex-direction:column; align-items:center; text-align:center; gap:.12rem;
+  font-size:.75rem; font-weight:800; transition:background .2s,border-color .2s,color .2s; }
+.ac-scan-stages li span { font-size:.68rem; font-weight:650; line-height:1.25; }
+.ac-scan-stages li.is-active { border-color:var(--aqua-primary); color:var(--aqua-primary); }
+.ac-scan-stages li.is-complete { background:var(--aqua-primary); border-color:var(--aqua-primary); color:#fff; }
+.ac-scan-progress-heading { display:flex; justify-content:space-between; align-items:baseline;
+  gap:.65rem; margin-bottom:.6rem; font-size:.81rem; }
+.ac-scan-progress-heading strong { overflow-wrap:anywhere; }
+#visualProgressText { flex:none; font-variant-numeric:tabular-nums; font-weight:850; }
+.ac-scan-track { height:11px; background:var(--aqua-border); border-radius:20px; overflow:hidden; }
+.ac-scan-fill { width:0; height:100%; border-radius:20px;
+  background:linear-gradient(90deg,#0d999a,#3ab891); transition:width .3s ease; }
+#visualProgressDetail { margin-top:.65rem; }
+.ac-scan-frame-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(100px,1fr)); gap:.65rem; margin-top:1rem; }
+.ac-scan-frame { position:relative; min-width:0; padding:.3rem; background:var(--aqua-surface);
+  border:2px solid var(--aqua-border); border-radius:.65rem;
+  transition:opacity .4s,transform .4s,border-color .3s; animation:ac-scan-appear .3s ease both; }
+.ac-scan-frame img { display:block; width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:.35rem; }
+.ac-scan-frame-empty { aspect-ratio:4/3; display:grid; place-items:center; color:var(--aqua-muted); font-size:.72rem; }
+.ac-scan-frame-label { display:block; font-size:.68rem; font-weight:800; padding:.3rem .12rem .1rem; }
+.ac-scan-frame small { display:block; padding:0 .12rem .2rem; color:var(--aqua-muted); font-size:.63rem; }
+.ac-scan-frame.is-best,.ac-result-frame.is-best { border-color:#1ba367; box-shadow:0 0 0 2px rgba(27,163,103,.16); }
+.ac-scan-frame.is-best .ac-scan-frame-label { color:#14935f; }
+.ac-scan-frame.is-discarded { animation:ac-scan-discard .9s ease forwards; }
+.ac-scan-frame.is-failed { border-color:#da867f; }
+.ac-result-frames { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:.7rem; margin:1rem 0; }
+.ac-result-frame { min-width:0; border:2px solid var(--aqua-border); padding:.3rem;
+  background:var(--aqua-surface); border-radius:.65rem; }
+.ac-result-frame img { display:block; aspect-ratio:4/3; object-fit:cover; width:100%; border-radius:.35rem; }
+.ac-result-frame span { font-size:.69rem; display:block; padding:.4rem .16rem; font-weight:700; overflow-wrap:anywhere; }
+@keyframes ac-scan-appear { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+@keyframes ac-scan-discard { 0% { opacity:1; transform:none; } 60% { opacity:.48; transform:scale(.94) rotate(-2deg); } 100% { opacity:.22; transform:scale(.92); filter:grayscale(1); } }
+@media (max-width:540px) { .ac-scan-progress { padding:.8rem; } .ac-scan-stages { gap:.25rem; }
+  .ac-scan-stages li { font-size:.68rem; } .ac-scan-stages li span { font-size:.58rem; }
+  .ac-scan-frame-grid { grid-template-columns:repeat(3,minmax(0,1fr));gap:.4rem; }
+}
+@media (prefers-reduced-motion: reduce) { .ac-scan-frame.is-discarded, .ac-scan-frame { animation:none; }
+  .ac-scan-frame.is-discarded { opacity:.3; } .ac-scan-fill { transition:none; } }
+
+.ac-scan-frame.is-shortlisted:not(.is-discarded):not(.is-failed) { border-color:#25a579; }

@@ -210,10 +210,11 @@ class FishScanDeadlineTests(unittest.TestCase):
                 return {"mode": "mock_camera", "connected": True}
             def capture_burst(self, **kwargs):
                 return [{"image_bytes": b"frame", "frame_number": 1, "timestamp": "now"}]
-        empty_detection = {"objects": [], "images": [], "timed_out": False, "detector_used": "test"}
+        empty_detection = {"objects": [], "images": [{"image_id": "IMG-001", "object_count": 0}],
+                           "timed_out": False, "detector_used": "test"}
         with patch.object(vision, "camera_module", FakeCamera()), \
              patch.object(vision, "db", None), \
-             patch.object(vision, "select_best_snapshots", return_value=[{"image_bytes": b"frame"}]), \
+             patch.object(vision, "select_best_snapshots", return_value=[{"image_bytes": b"frame", "selected_id": "selected_001"}]), \
              patch.object(vision, "analyze_selected_snapshots", return_value=empty_detection):
             result = vision.start_prediction(duration_seconds=3, top=10)
         self.assertTrue(result["ok"], result)

@@ -216,7 +216,8 @@ def run(image_path: Path, model_paths: List[Path], conf: float, imgsz: int, max_
     detections = merge_detections(detections)
 
     return {
-        "ok": True,
+        "ok": bool(models_used),
+        "message": "No NCNN model could run." if not models_used else "Inference completed.",
         "models_used": models_used,
         "raw_count": raw_count,
         "ignored_count": ignored_count,
