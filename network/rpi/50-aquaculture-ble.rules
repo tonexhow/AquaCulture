@@ -1,0 +1,10 @@
+// Only this dedicated, non-login service account receives these NetworkManager privileges.
+polkit.addRule(function(action, subject) {
+    if (subject.user === "aquaculture-ble" && [
+        "org.freedesktop.NetworkManager.network-control",
+        "org.freedesktop.NetworkManager.wifi.scan",
+        "org.freedesktop.NetworkManager.settings.modify.system"
+    ].indexOf(action.id) !== -1) {
+        return polkit.Result.YES;
+    }
+});

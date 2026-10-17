@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AquaCulture fish and water logo">
+<defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#80ead5"/><stop offset="1" stop-color="#5bc8ec"/></linearGradient></defs>
+<rect x="1" y="1" width="62" height="62" rx="15" fill="#102d3a" stroke="#37616c" stroke-width="2"/>
+<path d="M11 42c7-7 15-7 22 0s14 7 21 0" fill="none" stroke="#8cebd6" stroke-width="3.2" stroke-linecap="round" opacity=".9"/>
+<path d="M12 49c8-6 15-6 22 0s13 6 18 0" fill="none" stroke="#8cebd6" stroke-width="2.8" stroke-linecap="round" opacity=".55"/>
+<path d="M13 27c9-11 20-13 32-5l8-8v24l-8-8c-12 8-23 6-32-3Z" fill="url(#a)"/>
+<circle cx="31" cy="24" r="2.2" fill="#102d3a"/>
+<path d="M19 31c5 3 11 4 17 1" fill="none" stroke="#174b60" stroke-width="2" stroke-linecap="round"/>
+</svg>

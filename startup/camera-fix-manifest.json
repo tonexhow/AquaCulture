@@ -1,0 +1,109 @@
+{
+  "format": 1,
+  "files": [
+    {
+      "path": ".env.example",
+      "sha256": "b2a4e1f65877582ba6f0879ced5999250a8abb96081b003a64f41a9aa43e7576"
+    },
+    {
+      "path": "client/static/index/index.js",
+      "sha256": "901b350ab746399b9d8350c69a98a9c39ec977ca4f764ff511a966cd822c8818"
+    },
+    {
+      "path": "database/catalog_migration.py",
+      "sha256": "f231d5421454699ee4c962a78555f01c2021dd6f517ac244b1119ef99531ace5"
+    },
+    {
+      "path": "database/create_database.py",
+      "sha256": "e9f8d827ba833b48e84089de1fcd060101517d4a751ee53f9234c7fb77393863"
+    },
+    {
+      "path": "database/maintenance.py",
+      "sha256": "8c51ad30d99bef0833314dc4ccb0cae16a3be983c5a0ab8121d51a285f10768a"
+    },
+    {
+      "path": "database/media_storage.py",
+      "sha256": "4a375722d143b9082fee72d27c83fe1ee4cd754366fad29c8e03557051716232"
+    },
+    {
+      "path": "server/__init__.py",
+      "sha256": "54fd097054b96145c15badb915b05ef6ece3e2ac23b7fccc7713d3fa05cce9d1"
+    },
+    {
+      "path": "server/api_manager.py",
+      "sha256": "bc877f11834bf5f91db960ca5819e4d9387a2fe8c7ac25fded3045e6829e88d3"
+    },
+    {
+      "path": "server/app.py",
+      "sha256": "1375d009f4fbeee565778fe3720d3744b90f031fa2f3e7abccabb5599327887a"
+    },
+    {
+      "path": "server/auth.py",
+      "sha256": "25098f9e817525aeafdd74a407de096c5e4cf27f1aded13f262d280f1cc33283"
+    },
+    {
+      "path": "server/camera_devices.py",
+      "sha256": "e9eff7d793b9ced4c235f77b58f9eff1cadcc862db347e9682690996709c620b"
+    },
+    {
+      "path": "server/live_streaming.py",
+      "sha256": "d699178515f0bf60e3e50b7e78983c162f3b5825686d950c0386e35ff61f4625"
+    },
+    {
+      "path": "server/scanner/fish_recommendation.py",
+      "sha256": "b21e18f10b3691d223b4ecb89870935bbe51962e5b7996aaa3a860dfa3b816c3"
+    },
+    {
+      "path": "server/scanner/size_detection.py",
+      "sha256": "6d5102f309fdbee4621eb66d195b80ba07324d7cf14ddb456f1250ff376b8b33"
+    },
+    {
+      "path": "server/sensors.py",
+      "sha256": "23bd656183624911d7cbcd7595351450ba0299535ad65cd26de9bb2913b86c6d"
+    },
+    {
+      "path": "server/settings/admin_password.py",
+      "sha256": "110895bf05e8930b2854ed599261b5d8f82f0cffc197999b040fe2710dca0bcd"
+    },
+    {
+      "path": "server/settings/database_tables.py",
+      "sha256": "03ca43fcb219f3fb5bababe4993b82e7eb86c5e3f04de737379e1e4dd0d99969"
+    },
+    {
+      "path": "server/settings/notification/reading_worker.py",
+      "sha256": "706769c7fdee9c98f00d4d405ea4e34264cda67aacdd119c0bbb9ede211d442c"
+    },
+    {
+      "path": "server/settings/notification/summary_scheduler.py",
+      "sha256": "91f4346f4c0cd15ce0240a7b104b1830c526d12b8bbb30d808095882e359ee75"
+    },
+    {
+      "path": "server/settings/password_recovery.py",
+      "sha256": "453fd36792b912ad00f53003e1aced3e2c24619b228e22e8ee33b25497fbf10d"
+    },
+    {
+      "path": "server/settings/species.py",
+      "sha256": "65c577a6460017a52bb78b4148385c3bb69477ffbd3cb0d1c14c0d0e9b103e5d"
+    },
+    {
+      "path": "startup/CAMERA_FIX_DEPLOYMENT.md",
+      "sha256": "d0018a1ef4c35d30119adff8bd5cd36f4e638016966c03e6d883003ec5d4542f"
+    },
+    {
+      "path": "startup/CAMERA_FIX_REPORT.md",
+      "sha256": "0662f4e166c4da1b83e98e8d2aa31c37bd4546172393f4f52671d9f213608fc3"
+    },
+    {
+      "path": "startup/build_camera_fix.py",
+      "sha256": "5c23ab053fcea62be2f8f8ede5fe15ea79390989b7bba9c99e5e07cce8bb0dab"
+    },
+    {
+      "path": "startup/deploy-camera-fix.sh",
+      "sha256": "c6d970cd254f20e60283c0e7dcd16cabcbc7eacc5438ae67e859bf0fcf8fcc3c"
+    },
+    {
+      "path": "startup/rollback-camera-fix.sh",
+      "sha256": "28e7a6019086fb62bbcc584ea022fe2ece7a91ebc3e83a85a0cfd4b09b396af6"
+    }
+  ]
+}

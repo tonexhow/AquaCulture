@@ -1,0 +1,291 @@
+cd ~/AquaCulture || exit 1
+
+bash <<'AQUACULTURE_SETUP'
+set -Eeuo pipefail
+export SYSTEMD_PAGER=cat PAGER=cat
+
+ROOT="$HOME/AquaCulture"
+APP_USER="$(id -un)"
+APP_GROUP="$(id -gn)"
+PYTHON="$ROOT/.venv/bin/python"
+STATE_DIR="/var/lib/aquaculture-ble"
+WEB="aquaculture-web.service"
+BLE="aquaculture-ble.service"
+
+section() {
+    printf '\n==================================================\n %s\n==================================================\n' "$1"
+}
+on_error() {
+    code=$?
+    printf '\n[ERROR] Setup stopped at line %s (exit status %s).\n' "$1" "$code" >&2
+    printf '[NEXT] Copy the last error messages for troubleshooting. Do not reboot yet.\n' >&2
+    exit "$code"
+}
+trap 'on_error "$LINENO"' ERR
+
+section 'AQUACULTURE - FIRST-TIME RASPBERRY PI SETUP'
+printf 'Project: %s\nAccount: %s:%s\nBLE state: %s\n' "$ROOT" "$APP_USER" "$APP_GROUP" "$STATE_DIR"
+
+if [ "$(id -u)" -eq 0 ]; then
+    echo '[ERROR] Run as your normal Pi user, not using sudo bash or a root shell.'
+    exit 1
+fi
+cd "$ROOT"
+for f in \
+    server/app.py server/requirements.txt \
+    network/rpi/main.py network/rpi/requirements.txt \
+    startup/install.sh; do
+    if [ ! -f "$f" ]; then
+        printf '[ERROR] Missing project file: %s\n' "$f"
+        exit 1
+    fi
+done
+[ -f .env ] || echo '[WARNING] .env is missing. Check your application configuration.'
+sudo -v
+
+section 'STOPPING PREVIOUS AQUACULTURE SERVICES'
+sudo systemctl stop "$WEB" "$BLE" 2>/dev/null || true
+sudo systemctl reset-failed "$WEB" "$BLE" 2>/dev/null || true
+
+section 'INSTALLING RASPBERRY PI OS DEPENDENCIES'
+sudo apt-get update
+sudo apt-get install -y \
+    python3 python3-pip python3-venv python3-dev \
+    python3-dbus python3-gi python3-gi-cairo gir1.2-glib-2.0 \
+    build-essential pkg-config libglib2.0-dev libdbus-1-dev \
+    libbluetooth-dev bluetooth bluez rfkill network-manager
+
+section 'PREPARING PYTHON ENVIRONMENT'
+if [ ! -x "$PYTHON" ]; then
+    python3 -m venv --system-site-packages "$ROOT/.venv"
+fi
+if [ -f "$ROOT/.venv/pyvenv.cfg" ]; then
+    sed -i 's/^include-system-site-packages = false/include-system-site-packages = true/' \
+        "$ROOT/.venv/pyvenv.cfg"
+fi
+"$PYTHON" -m pip install -r "$ROOT/server/requirements.txt"
+"$PYTHON" -m pip install -r "$ROOT/network/rpi/requirements.txt"
+"$PYTHON" - <<'PY_IMPORTS'
+import importlib
+for name in ('flask', 'flask_socketio', 'dbus', 'dbus_next', 'gi', 'werkzeug'):
+    importlib.import_module(name)
+    print('[OK] Python module:', name)
+PY_IMPORTS
+
+section 'VERIFYING BLUETOOTH CLI CONFIGURATION'
+# main.py calls serve(args.state_dir); explicitly choose a persistent,
+# application-owned state path instead of its inaccessible default.
+if ! "$PYTHON" "$ROOT/network/rpi/main.py" --help 2>&1 | grep -q -- '--state-dir'; then
+    echo '[ERROR] network/rpi/main.py does not advertise --state-dir.'
+    echo '[NEXT] Check its argument parser before altering the service startup command.'
+    exit 1
+fi
+echo '[OK] BLE application supports --state-dir.'
+
+section 'CREATING PERSISTENT BLE AUTHENTICATION STATE'
+# Confirmed failure: DurableLimiter.__init__ -> self.path.parent.mkdir()
+# raised PermissionError because the prior default state path was not writable.
+# Do not run the BLE application as root or grant broad system permissions.
+sudo install -d -o "$APP_USER" -g "$APP_GROUP" -m 0700 "$STATE_DIR"
+if [ "$(stat -c '%U' "$STATE_DIR")" != "$APP_USER" ]; then
+    echo '[ERROR] BLE state directory has unexpected ownership.'
+    exit 1
+fi
+"$PYTHON" - "$STATE_DIR" <<'PY_STATE'
+from pathlib import Path
+import sys
+import tempfile
+state = Path(sys.argv[1])
+with tempfile.NamedTemporaryFile(dir=state, prefix='.aquaculture-write-check-', delete=True):
+    pass
+print('[OK] BLE state directory is writable by the service account.')
+PY_STATE
+for state_file in "$STATE_DIR/auth_limits.sqlite3" "$STATE_DIR/history.sqlite3"; do
+    if [ -e "$state_file" ] && [ ! -w "$state_file" ]; then
+        echo "[ERROR] Existing state database is not writable: $state_file"
+        echo '[NEXT] Inspect its ownership rather than deleting or resetting it.'
+        exit 1
+    fi
+done
+
+section 'PROTECTING EXISTING CONFIGURATION'
+# Restrict modes only for existing files owned by the current account.
+if [ -f "$ROOT/.env" ] && [ ! -L "$ROOT/.env" ]; then
+    if [ "$(stat -c '%U' "$ROOT/.env")" = "$APP_USER" ]; then
+        chmod 600 "$ROOT/.env"
+        echo '[OK] .env permissions set to 600.'
+    else
+        echo '[WARNING] .env is not owned by this user; permissions unchanged.'
+    fi
+fi
+if [ -d "$ROOT/database" ]; then
+    while IFS= read -r -d '' db; do
+        if [ "$(stat -c '%U' "$db")" = "$APP_USER" ]; then
+            chmod 600 "$db"
+        fi
+    done < <(find "$ROOT/database" -maxdepth 1 -type f \
+        \( -name '*.sqlite3' -o -name '*.sqlite' -o -name '*.db' \) -print0)
+fi
+# No passwords, database content, pairing data, or ML model files are changed.
+
+section 'ENABLING BLUETOOTH AND CHECKING NETWORKMANAGER'
+sudo systemctl enable --now bluetooth.service
+if systemctl is-active --quiet NetworkManager.service; then
+    echo '[OK] NetworkManager is running.'
+else
+    echo '[WARNING] NetworkManager is not running. Wi-Fi provisioning may not work.'
+    echo '[WARNING] The installer will not replace your network manager remotely.'
+fi
+sudo rfkill unblock bluetooth
+for attempt in 1 2 3; do
+    if sudo timeout 8 bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then
+        break
+    fi
+    sudo timeout 8 bluetoothctl power on >/dev/null 2>&1 || true
+    sleep 2
+done
+if sudo timeout 8 bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then
+    echo '[OK] Bluetooth controller powered on.'
+else
+    echo '[WARNING] Bluetooth controller not powered on; BLE may not start.'
+    sudo timeout 8 bluetoothctl show 2>/dev/null | grep -E 'Controller|Powered:|PowerState:' || true
+fi
+
+section 'CONFIGURING PERSISTENT SYSTEMD OVERRIDES'
+sudo mkdir -p \
+    "/etc/systemd/system/$WEB.d" \
+    "/etc/systemd/system/$BLE.d"
+
+# The BLE entry point explicitly receives the owned state directory.
+# Keep the application's original authentication store unchanged.
+printf '[Service]\nExecStart=\nExecStart=%s -u %s/server/app.py\n' \
+    "$PYTHON" "$ROOT" | \
+    sudo tee "/etc/systemd/system/$WEB.d/override.conf" >/dev/null
+printf '[Service]\nExecStart=\nExecStart=%s -u %s/network/rpi/main.py --state-dir %s\n' \
+    "$PYTHON" "$ROOT" "$STATE_DIR" | \
+    sudo tee "/etc/systemd/system/$BLE.d/override.conf" >/dev/null
+
+# Prevent a transient BlueZ Error.Busy during boot from stopping systemd.
+# A leading '-' ignores failures from these two narrow pre-start commands.
+RFKILL="$(command -v rfkill)"
+BTCTL="$(command -v bluetoothctl)"
+{
+    printf '[Unit]\nAfter=bluetooth.service NetworkManager.service\n'
+    printf 'Wants=bluetooth.service NetworkManager.service\n'
+    printf '[Service]\n'
+    printf 'ExecStartPre=-+%s unblock bluetooth\n' "$RFKILL"
+    printf 'ExecStartPre=-+%s power on\n' "$BTCTL"
+} | sudo tee "/etc/systemd/system/$BLE.d/40-bluetooth-power.conf" >/dev/null
+
+section 'INSTALLING STARTUP SERVICES'
+# Existing startup/install.sh is responsible for the base unit files.
+# The overrides above survive reinstalling those managed base units.
+sudo bash "$ROOT/startup/install.sh" --python "$PYTHON" --user "$APP_USER"
+sudo systemctl daemon-reload
+sudo systemctl enable "$WEB" "$BLE"
+sudo systemctl reset-failed "$WEB" "$BLE" 2>/dev/null || true
+
+section 'STARTING AQUACULTURE'
+sudo systemctl restart "$WEB" || true
+sudo systemctl restart "$BLE" || true
+sleep 18
+
+section 'SERVICE STATE'
+for service in "$WEB" "$BLE"; do
+    echo "--- $service ---"
+    systemctl is-enabled "$service" || true
+    systemctl is-active "$service" || true
+    systemctl show "$service" -p User -p Group -p NRestarts -p ExecMainStatus --no-pager || true
+done
+
+section 'RECENT WEB LOGS'
+sudo journalctl -u "$WEB" -n 18 --no-pager || true
+section 'RECENT BLUETOOTH LOGS'
+sudo journalctl -u "$BLE" -n 25 --no-pager || true
+
+section 'FINAL VERIFICATION'
+failed=0
+for service in "$WEB" "$BLE"; do
+    if systemctl is-enabled --quiet "$service"; then
+        echo "[OK] $service starts on boot."
+    else
+        echo "[FAILED] $service is not enabled."
+        failed=1
+    fi
+    if systemctl is-active --quiet "$service"; then
+        echo "[OK] $service is running."
+    else
+        echo "[FAILED] $service is not running."
+        failed=1
+    fi
+    restarts="$(systemctl show "$service" -p NRestarts --value 2>/dev/null || echo 0)"
+    if [[ "$restarts" =~ ^[0-9]+$ ]] && (( restarts > 0 )); then
+        echo "[WARNING] $service restarted $restarts time(s) during observation."
+        failed=1
+    fi
+done
+
+# If any new permission/BlueZ/DBus issue appears, identify source frames
+# without disclosing exception messages that may contain Wi-Fi credentials.
+if ! systemctl is-active --quiet "$BLE"; then
+    section 'BLE FAILURE TRACE (SOURCE LOCATIONS ONLY)'
+    sudo systemctl stop "$BLE" || true
+    set +e
+    timeout 12 "$PYTHON" -u - "$ROOT" "$STATE_DIR" <<'PY_TRACE'
+import logging
+import runpy
+import sys
+import traceback
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+state_dir = sys.argv[2]
+entry = root / 'network' / 'rpi' / 'main.py'
+sys.path[:0] = [str(entry.parent), str(root / 'network'), str(root)]
+sys.argv = [str(entry), '--state-dir', state_dir]
+original_error = logging.error
+
+def safe_error(message, *args, **kwargs):
+    kind, value, tb = sys.exc_info()
+    if kind is not None and tb is not None:
+        print('[BLE EXCEPTION TYPE]', kind.__name__, flush=True)
+        for frame in traceback.extract_tb(tb):
+            path = Path(frame.filename)
+            try:
+                path = path.relative_to(root)
+            except ValueError:
+                path = Path(frame.filename).name
+            print(f'[BLE FRAME] {path}:{frame.lineno} ({frame.name})', flush=True)
+    return original_error(message, *args, **kwargs)
+
+logging.error = safe_error
+try:
+    runpy.run_path(str(entry), run_name='__main__')
+except SystemExit:
+    pass
+except Exception as exc:
+    print('[BLE UNHANDLED TYPE]', type(exc).__name__, flush=True)
+    for frame in traceback.extract_tb(exc.__traceback__):
+        print(f'[BLE FRAME] {Path(frame.filename).name}:{frame.lineno} ({frame.name})', flush=True)
+PY_TRACE
+    trace_status=$?
+    set -e
+    if [ "$trace_status" -eq 124 ]; then
+        echo '[INFO] BLE diagnostic timed out; check whether it was waiting or advertising.'
+    fi
+    echo '[WARNING] BLE service left stopped to prevent a restart loop.'
+    failed=1
+fi
+
+if [ "$failed" -eq 0 ]; then
+    echo
+    echo '[OK] Both services are enabled and stayed active during the observation window.'
+    echo '[NEXT] Test the web UI and actual BLE advertising, Admin verification, and Wi-Fi provisioning.'
+    echo '[NEXT] Reboot and recheck services only after the functional tests pass.'
+else
+    echo
+    echo '[INCOMPLETE] One or more checks failed. Do not reboot yet.'
+    echo '[NEXT] Share the final service log and BLE FRAME lines for the targeted fix.'
+    exit 1
+fi
+AQUACULTURE_SETUP

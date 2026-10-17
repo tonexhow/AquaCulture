@@ -1,0 +1,46 @@
+# Local environment secrets
+.env
+
+# Installed dependencies and generated development caches
+.venv/
+venv/
+.dev-deps/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Generated operating-system metadata
+.DS_Store
+Thumbs.db
+.vscode/
+models/
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.zip
+*.rar
+*.7z
+*.bak
+*.onnx
+*.pt
+*.pth
+*.h5
+*.tflite
+*.ncnn.bin
+*.pem
+*.key
+*.p12
+*.pfx
+# AquaCulture runtime state
+/database/admin_sessions.json
+/database/configuration.json
+/server/network/network_mode.json
+**/.yolo_config/
+# Local secrets and generated state
+# Existing models are tracked separately
+/models/

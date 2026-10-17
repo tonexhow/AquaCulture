@@ -1,0 +1,114 @@
+/* AquaCulture Phase 2B / Part 1 — visual and layout layer only.
+   Sensor, scoring, species rules, and scan APIs are deliberately unchanged. */
+:root { --ac-nav-width: 248px; --ac-topbar-height: 69px; }
+html { scroll-padding-top: 5.5rem; }
+body { overflow-x: clip; }
+
+/* Keep the desktop navigation anchored to the viewport, regardless of how
+   far the Home, Water Testing, or Fish Scanning page is scrolled. */
+@media (min-width: 901px) {
+  .ac2-shell { display: block; min-height: 100dvh; }
+  .ac2-sidebar {
+    position: fixed; inset: 0 auto 0 0; z-index: 75;
+    width: var(--ac-nav-width); height: 100vh; height: 100dvh;
+    min-height: 0; overflow: hidden;
+  }
+  .ac2-workspace { margin-left: var(--ac-nav-width); min-width: 0; }
+  .ac2-nav-area { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .ac2-side-bottom { margin-top: auto; flex: 0 0 auto; background: rgba(2, 26, 36, .17); }
+}
+@media (min-width: 901px) and (max-width: 1190px) { :root { --ac-nav-width: 222px; } }
+.ac2-topbar {
+  position: sticky; top: 0; z-index: 65;
+  height: var(--ac-topbar-height); min-height: var(--ac-topbar-height);
+  background: var(--aqua-surface); background: color-mix(in srgb, var(--aqua-surface) 95%, transparent);
+  box-shadow: 0 2px 16px rgba(3, 46, 57, .03);
+}
+.ac2-sidebar { scrollbar-width: thin; scrollbar-color: rgba(155, 220, 216, .4) transparent; }
+.ac2-brandbar { padding-top: 1.35rem; padding-bottom: 1.4rem; }
+.ac2-nav-caption { letter-spacing: .12em; }
+.ac2-nav-caption-second { margin-top: 1.65rem; }
+.ac2-nav-item { min-height: 45px; border-radius: .65rem; padding: .72rem .8rem; font-size: .83rem; }
+.ac2-nav-item.is-active { box-shadow: none; }
+.ac2-nav-ico { flex-basis: 21px; }
+.ac2-side-bottom { padding: 1.1rem 1.25rem 1.2rem; }
+.ac2-device-note { margin-top: .5rem; }
+.ac2-top-right, .ac2-top-left { flex-shrink: 0; }
+.ac2-crumbs { min-width: 0; }
+
+/* A compact first screen keeps actual sensor information visible above the fold. */
+.ac2-main { max-width: 1370px; padding-top: clamp(1.45rem, 2.4vw, 2.2rem); }
+.ac2-page-head { margin-bottom: 1.15rem; }
+.ac2-page-head h1 { margin-top: .2rem; margin-bottom: .28rem; font-size: clamp(1.52rem,2.4vw,1.98rem); }
+.ac2-page-head p { font-size: .81rem; max-width: 48rem; }
+.ac2-home-head .ac2-head-badge { align-self: center; }
+.ac2-hero { min-height: 0; grid-template-columns: minmax(0,1.2fr) minmax(175px,.7fr); border-radius: .95rem; }
+.ac2-hero-body { padding: clamp(1.45rem,2.5vw,2.05rem) clamp(1.5rem,3vw,2.4rem); }
+.ac2-hero h2 { font-size: clamp(1.75rem,2.65vw,2.5rem); line-height: 1.13; margin: .62rem 0 .65rem; }
+.ac2-hero-body > p { font-size: .81rem; line-height: 1.55; max-width: 30rem; }
+.ac2-hero-actions { margin-top: 1.05rem; gap: .55rem; }
+.ac2-hero .ac2-button { min-height: 42px; }
+.ac2-hero-art svg { width: min(100%,280px); }
+.ac2-hero-orbit.orbit-one { width: 255px; height: 255px; }
+.ac2-hero-orbit.orbit-two { width: 355px; height: 355px; }
+.ac2-block { margin-top: 1.65rem; }
+.ac2-panel, .ac2-metric, .ac2-live-reading { box-shadow: 0 6px 24px rgba(9,44,55,.025); }
+.ac2-button, .ac2-icon-button { transition: color .15s ease, background-color .15s ease, border-color .15s ease, transform .15s ease; }
+.ac2-button:active:not(:disabled), .ac2-icon-button:active:not(:disabled) { transform: translateY(1px); }
+
+/* Camera controls adjust only the preview; inference snapshots are unchanged. */
+.ac2-camera-frame { overflow: hidden; }
+.ac2-camera-frame img { transform-origin: center center; transition: transform .2s ease; }
+.ac2-camera-foot { align-items: flex-start; gap: .85rem; }
+.ac2-camera-foot > span { max-width: 285px; line-height: 1.6; }
+.ac2-camera-actions { display: inline-flex; gap: .45rem; align-items: center; flex-wrap: wrap; }
+.ac2-camera-actions .ac2-button { min-height: 39px; padding: .55rem .75rem; }
+.ac2-camera-actions .is-selected { background: var(--aqua-primary-soft); border-color: var(--aqua-primary); color: var(--aqua-primary); }
+
+/* Consistent form, tooltip and dialog behavior. */
+.ac2-select, .ac2-input { font-weight: 550; }
+.ac2-select:disabled, .ac2-input:disabled { opacity: .55; cursor: not-allowed; }
+.ac2-dialog { max-height: min(90dvh,740px); overflow-y: auto; }
+.ac2-dialog-card { border-radius: 1rem; box-shadow: 0 24px 60px rgba(0, 17, 23, .22); }
+[data-tooltip]:hover::after, [data-tooltip]:focus-visible::after {
+  max-width: min(230px, 70vw); white-space: normal; overflow-wrap: anywhere;
+  line-height: 1.4; font-weight: 550; pointer-events: none;
+  box-shadow: 0 7px 22px rgba(0,0,0,.17);
+}
+.toast-stack { z-index: 200; }
+.toast { padding-right: 2.6rem; }
+.toast__close { position: absolute; top: .52rem; right: .55rem; width: 25px; height: 25px;
+  display: grid; place-items: center; background: transparent; color: var(--aqua-muted); border: 0; border-radius: .35rem; cursor: pointer; font-size: 1.1rem; }
+.toast__close:hover { background: var(--aqua-primary-soft); color: var(--aqua-text); }
+.toast.is-leaving { opacity: 0; transform: translateY(6px); transition: opacity .15s ease, transform .15s ease; }
+
+@media (max-width: 900px) {
+  :root { --ac-topbar-height: 65px; }
+  .ac2-shell { display: block; }
+  .ac2-sidebar { position: fixed; inset: 0 auto 0 0; height: 100dvh; min-height: 0; overflow: hidden; }
+  .ac2-nav-area { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .ac2-side-bottom { flex: 0 0 auto; margin-top: auto; }
+  .ac2-workspace { margin-left: 0; }
+  .ac2-hero { grid-template-columns: minmax(0,1.15fr) minmax(125px,.65fr); }
+  .ac2-hero-art svg { width: min(100%,235px); }
+}
+@media (max-width: 680px) {
+  :root { --ac-topbar-height: 62px; }
+  .ac2-main { padding-top: 1.1rem; }
+  .ac2-hero { display: block; }
+  .ac2-hero-body { padding: 1.45rem 1.35rem; }
+  .ac2-hero h2 { font-size: clamp(1.75rem,7vw,2.15rem); }
+  .ac2-camera-foot { flex-direction: column; }
+  .ac2-camera-actions { width: 100%; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .ac2-camera-actions .ac2-button { width: 100%; padding: .55rem .3rem; font-size: .71rem; }
+  .ac2-page-head { margin-bottom: 1rem; }
+}
+@media (max-width: 430px) {
+  .ac2-topbar { gap: .3rem; }
+  .ac2-top-right { gap: .36rem; }
+  .ac2-main { padding-left: .85rem; padding-right: .85rem; }
+  .ac2-hero-body { padding: 1.35rem 1.15rem; }
+  .ac2-dialog-card { padding: 1.4rem; }
+  .toast-stack { bottom: .65rem; right: .65rem; width: calc(100vw - 1.3rem); }
+}
+@media (prefers-reduced-motion: reduce) { .ac2-camera-frame img { transition: none; } }
